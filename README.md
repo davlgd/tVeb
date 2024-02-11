@@ -2,6 +2,8 @@
 
 The efficient solution to host your static stuff, written in [V](https://vlang.io), using the new [x.vweb vlib](https://github.com/vlang/v/tree/master/vlib/x/vweb). It's a single binary, easy to compile, light and fast. It fits in < 1 MB, without compression!
 
+I use it to host [my tech blog](https://labs.davlgd.fr).
+
 ## Compile V from source
 
 If you don't have V installed, you can compile it from source:
@@ -19,6 +21,10 @@ Once you have V installed, clone this repository and compile the server with the
 ```bash
 v -prod .
 ```
+
+## Get binaries
+
+You can download binaries and SHA256/512 sums from the [releases page](https://github.com/davlgd/tws/releases).
 
 ## Run the server
 

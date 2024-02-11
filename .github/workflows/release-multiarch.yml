@@ -1,0 +1,62 @@
+# This workflow build tws binary and calculate SHA256/512 sums when a release is created
+# It then uploads the generated files to the release
+
+name: Build TWS with V
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  deploy:
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: self-hosted
+            labels: Linux
+            arch: ARM64
+          - runner: self-hosted
+            labels: macOS
+            arch: ARM64
+          - runner: ubuntu-latest
+            labels: Linux
+            arch: x86_64
+          - runner: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup V
+        run: |
+          git clone https://github.com/vlang/v
+          cd v && make || cmd /c make.bat
+
+      - name: Build tws & calculate checksums (UNIX)
+        run: scripts/release.sh
+        if: runner.os != 'Windows'
+      - name: Build tws & calculate checksums (Windows)
+        run: cmd /c scripts\release.bat
+        if: runner.os == 'Windows'
+
+      - name: Set ARCH/OS variables (UNIX)
+        if: runner.os != 'Windows'
+        run: |
+          echo "OS_NAME=$(uname -s | tr '[:upper:]' '[:lower:]')" >> ${GITHUB_ENV}
+          echo "ARCH=$(uname -m | tr '[:upper:]' '[:lower:]')" >> ${GITHUB_ENV}
+
+      - name: Publish generated files
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            bin/tws-${{ env.OS_NAME }}-${{ env.ARCH }}
+            bin/tws-${{ env.OS_NAME }}-${{ env.ARCH }}.sha256
+            bin/tws-${{ env.OS_NAME }}-${{ env.ARCH }}.sha512
+        env:
+          OS_NAME: ${{ runner.os == 'Windows' && 'windows' || env.OS_NAME }}
+          ARCH: ${{ runner.os == 'Windows' && 'x86_64.exe' || env.ARCH }}

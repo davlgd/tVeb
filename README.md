@@ -49,4 +49,8 @@ You can specify the folder where your files are located:
 ./tws /path/to/your/folder
 ```
 
-To change to port, edit the source code and recompile.
+To change the port:
+```bash
+./tws 4242
+./tws /path/to/your/folder 4242
+```

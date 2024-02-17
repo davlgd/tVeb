@@ -1,7 +1,9 @@
 module main
 
 import os
+import time
 import x.vweb
+import net.http
 
 pub struct Context {
 	vweb.Context
@@ -9,10 +11,15 @@ pub struct Context {
 
 pub struct App {
 	vweb.StaticHandler
+	vweb.Middleware[Context]
 }
 
 fn print_help() {
 	println("usage: ${os.args[0]} [folder_to_serve] [port] (default: 'public', 8080)")
+}
+
+fn to_http_date(unix_time time.Time) string {
+	return unix_time.custom_format('ddd, DD MMM YYYY HH:mm:ss') + ' GMT'
 }
 
 fn get_settings() (string, int, string) {
@@ -68,6 +75,18 @@ pub fn (mut ctx Context) not_found() vweb.Result {
 	return ctx.html(content)
 }
 
+pub fn modify_headers(mut ctx Context) bool {
+	ctx.set_header(.server, 'Tiniest vWeb Server')
+	ctx.res.header.add(http.CommonHeader.cache_control, 'max-age=3600, must-revalidate')
+
+	file_mod_timesamp := os.file_last_mod_unix(ctx.return_file)
+	file_mod_datetime := time.unix(file_mod_timesamp)
+	ctx.res.header.add(http.CommonHeader.last_modified, to_http_date(file_mod_datetime))
+
+	ctx.res.header.add(.expires, to_http_date(time.now().add_seconds(3600)))
+	return true
+}
+
 fn main() {
 	folder, port, error := get_settings()
 
@@ -94,6 +113,7 @@ fn main() {
 
 	mut app := &App{}
 	app.handle_static(folder, true)!
+	app.use(handler: modify_headers, after: true)
 	println("Server is started, serving '${folder}' folder")
 	vweb.run[App, Context](mut app, port)
 }

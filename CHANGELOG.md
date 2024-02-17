@@ -1,5 +1,12 @@
 # Tiniest vWeb Server
 
+## 0.1.3 (2024-02-17)
+
+- Add custom `server` HTTP header
+- Add `Cache-Control` HTTP header
+- Add `Last-Modified` HTTP header
+- Add `Expires` HTTP header
+
 ## 0.1.2 (2024-02-17)
 
 - Add support to `404.html` files (at the root of the served folder)

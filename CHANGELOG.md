@@ -1,5 +1,10 @@
 # Tiniest vWeb Server
 
+## 0.1.2 (2024-02-17)
+
+- Add support to `404.html` files (at the root of the served folder)
+- Factorize the code to better handle settings and errors
+
 ## 0.1.1 (2024-02-12)
 
 - User can now set the port of the server (default is `8080`)

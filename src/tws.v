@@ -15,20 +15,18 @@ fn print_help() {
 	println("usage: ${os.args[0]} [folder_to_serve] [port] (default: 'public', 8080)")
 }
 
-fn main() {
+fn get_settings() (string, int, string) {
 	mut folder := 'public'
 	mut port := 8080
+	mut error := ''
 
 	if os.args.len > 3 {
-		eprintln('error: too many arguments')
-		print_help()
-		exit(1)
+		return '', 0, 'error: too many arguments'
 	}
 
 	for arg in os.args[1..] {
 		if arg == '--help' || arg == '-h' {
-			print_help()
-			return
+			return '', 0, ''
 		}
 	}
 
@@ -49,6 +47,39 @@ fn main() {
 			}
 			else {}
 		}
+	}
+
+	return folder, port, error
+}
+
+pub fn (mut ctx Context) not_found() vweb.Result {
+	folder, _, _ := get_settings()
+	mut file_path := '404.html'
+
+	if folder != '/' {
+		file_path = '${folder}/${file_path}'
+	}
+
+	content := os.read_file(file_path) or {
+		ctx.res.set_status(.not_found)
+		return ctx.html('<h1>Page not found!</h1>')
+	}
+
+	return ctx.html(content)
+}
+
+fn main() {
+	folder, port, error := get_settings()
+
+	if error != '' {
+		eprintln(error)
+		print_help()
+		exit(1)
+	}
+
+	if folder == '' && port == 0 {
+		print_help()
+		exit(0)
 	}
 
 	if !os.is_dir(folder) {

@@ -1,0 +1,2 @@
+cache_control = "max-age=3600"
+expiration_delay = 3600

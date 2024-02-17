@@ -1,5 +1,9 @@
 # Tiniest vWeb Server
 
+## 0.1.4 (2024-02-18)
+
+- HTTP headers can be customized via the `headers.toml` file
+
 ## 0.1.3 (2024-02-17)
 
 - Add custom `server` HTTP header

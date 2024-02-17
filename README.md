@@ -54,3 +54,12 @@ To change the port:
 ./tws 4242
 ./tws /path/to/your/folder 4242
 ```
+## Custom headers
+
+You can define some headers adding a `headers.toml` file where the server is running:
+
+```toml
+cache_control = "max-age=3600"
+# Delay in seconds added to the date/time of the request to define `Expires` header
+expiration_delay = 3600
+```

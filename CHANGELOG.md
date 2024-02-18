@@ -1,5 +1,10 @@
 # Tiniest vWeb Server
 
+## 0.1.5 (2024-02-18)
+
+- Check if the port is available before starting the server
+- Use new native `http_header_string()` to form headers date/time stamps
+
 ## 0.1.4 (2024-02-18)
 
 - HTTP headers can be customized via the `headers.toml` file

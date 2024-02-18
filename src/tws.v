@@ -1,6 +1,7 @@
 module main
 
 import os
+import net
 import toml
 import time
 import x.vweb
@@ -17,10 +18,6 @@ pub struct App {
 
 fn print_help() {
 	println("usage: ${os.args[0]} [folder_to_serve] [port] (default: 'public', 8080)")
-}
-
-fn to_http_date(unix_time time.Time) string {
-	return unix_time.custom_format('ddd, DD MMM YYYY HH:mm:ss') + ' GMT'
 }
 
 fn get_settings() (string, int, string) {
@@ -88,13 +85,20 @@ fn add_headers_to_context(mut ctx Context) {
 	headers := toml.parse_file('headers.toml') or { panic(err) }
 
 	ctx.set_header(.server, 'Tiniest vWeb Server')
-	ctx.res.header.add(http.CommonHeader.cache_control, headers.value('cache_control').default_to(default_cache_control).string())
+	ctx.res.header.add(http.CommonHeader.cache_control, headers
+		.value('cache_control')
+		.default_to(default_cache_control)
+		.string())
 
 	file_mod_timesamp := os.file_last_mod_unix(ctx.return_file)
 	file_mod_datetime := time.unix(file_mod_timesamp)
-	ctx.res.header.add(http.CommonHeader.last_modified, to_http_date(file_mod_datetime))
+	ctx.res.header.add(http.CommonHeader.last_modified, file_mod_datetime.http_header_string())
 
-	ctx.res.header.add(.expires, to_http_date(time.utc().add_seconds(headers.value('expiration_delay').default_to(default_expiration_delay).int())))
+	ctx.res.header.add(.expires, time.utc()
+		.add_seconds(headers
+			.value('expiration_delay')
+			.default_to(default_expiration_delay).int())
+		.http_header_string())
 }
 
 fn main() {
@@ -117,9 +121,15 @@ fn main() {
 	}
 
 	if port < 1 || port > 65535 {
-		eprintln('error: invalid port number: ${port}')
+		eprintln('error: ${port} is an invalid port number')
 		exit(1)
 	}
+
+	mut test_port := net.listen_tcp(.ip, ':$port') or {
+		eprintln("error: the port ${port} seems to be busy")
+		exit(1)
+	}
+	test_port.close()!
 
 	mut app := &App{}
 	app.handle_static(folder, true)!

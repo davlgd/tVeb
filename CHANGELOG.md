@@ -1,4 +1,9 @@
-# Tiniest vWeb Server
+# Tiniest Veb Server
+
+## 0.2.0 (2024-09-29)
+
+- Migrate from `x.vweb` to `veb`
+- Rename project to `Tiniest Veb Server (tVeb)`
 
 ## 0.1.5 (2024-02-18)
 

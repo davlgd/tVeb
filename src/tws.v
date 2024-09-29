@@ -4,16 +4,16 @@ import os
 import net
 import toml
 import time
-import x.vweb
+import veb
 import net.http
 
 pub struct Context {
-	vweb.Context
+	veb.Context
 }
 
 pub struct App {
-	vweb.StaticHandler
-	vweb.Middleware[Context]
+	veb.StaticHandler
+	veb.Middleware[Context]
 }
 
 fn print_help() {
@@ -57,7 +57,7 @@ fn get_settings() (string, int, string) {
 	return folder, port, error
 }
 
-pub fn (mut ctx Context) not_found() vweb.Result {
+pub fn (mut ctx Context) not_found() veb.Result {
 	folder, _, _ := get_settings()
 	mut file_path := '404.html'
 
@@ -84,7 +84,7 @@ fn add_headers_to_context(mut ctx Context) {
 	default_expiration_delay := 3600
 	headers := toml.parse_file('headers.toml') or { panic(err) }
 
-	ctx.set_header(.server, 'Tiniest vWeb Server')
+	ctx.set_header(.server, 'Tiniest Veb Server')
 	ctx.res.header.add(http.CommonHeader.cache_control, headers
 		.value('cache_control')
 		.default_to(default_cache_control)
@@ -135,5 +135,5 @@ fn main() {
 	app.handle_static(folder, true)!
 	app.use(handler: custom_headers, after: true)
 	println("Server is started, serving '${folder}' folder")
-	vweb.run[App, Context](mut app, port)
+	veb.run[App, Context](mut app, port)
 }

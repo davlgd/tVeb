@@ -18,6 +18,11 @@ pub struct Context {
 }
 
 const server_name = 'Tiniest Veb Server'
+// The headers set by the server itself, which can't be customized.
+const reserved_headers = ['accept-ranges', 'allow', 'cache-control', 'connection', 'content-encoding',
+	'content-length', 'content-range', 'content-type', 'date', 'etag', 'expires', 'keep-alive',
+	'last-modified', 'location', 'proxy-connection', 'server', 'te', 'trailer', 'transfer-encoding',
+	'upgrade', 'vary']!
 const default_mime_type = 'application/octet-stream'
 // The kinds of files worth compressing, the other ones already are.
 const compressible_extensions = ['.css', '.csv', '.eot', '.htm', '.html', '.ico', '.ics', '.js',
@@ -45,6 +50,7 @@ struct Config {
 	cache_control    string = 'public, max-age=3600'
 	expiration_delay int    = 3600
 	compression      bool
+	headers          map[string]string
 }
 
 pub struct App {
@@ -107,18 +113,19 @@ fn get_settings() (string, int, string) {
 	return folder, port, error_msg
 }
 
+// not_found_page returns the `404.html` file of the served folder, or a
+// default page.
+fn not_found_page(folder string) string {
+	return os.read_file(os.join_path(folder, '404.html')) or { '<h1>Page not found!</h1>' }
+}
+
+// not_found is called by veb for the requests nothing answered. It does not
+// know the configuration: the `not_found_pages` middleware answers first.
 pub fn (mut ctx Context) not_found() veb.Result {
 	folder, _, _ := get_settings()
-	mut file_path := '404.html'
-
-	if folder != '/' {
-		file_path = '${folder}/${file_path}'
-	}
-
-	content := os.read_file(file_path) or { '<h1>Page not found!</h1>' }
 
 	ctx.res.set_status(.not_found)
-	result := ctx.html(content)
+	result := ctx.html(not_found_page(folder))
 	// veb sets its own `Server` header when it prepares the response
 	ctx.set_header(.server, server_name)
 	return result
@@ -147,16 +154,53 @@ fn load_config(path string) !Config {
 		return error('`compression` must be a boolean')
 	}
 
+	mut headers := map[string]string{}
+	headers_table := doc.value('headers')
+	if headers_table !is toml.Null {
+		if headers_table !is map[string]toml.Any {
+			return error('`headers` must be a table')
+		}
+		mut checker := http.new_header()
+		for name, value in headers_table.as_map() {
+			if value !is string {
+				return error('the `${name}` header must be a string')
+			}
+			if name.to_lower() in reserved_headers {
+				return error("the `${name}` header is set by the server and can't be customized")
+			}
+			if headers.keys().any(it.to_lower() == name.to_lower()) {
+				return error('the `${name}` header is defined twice')
+			}
+			if value.string().bytes().any(it == 0x7f || (it < 0x20 && it != `\t`)) {
+				return error('the `${name}` header contains a control character')
+			}
+			checker.set_custom(name, value.string()) or {
+				return error('the `${name}` header is invalid: ${err.msg()}')
+			}
+			headers[name] = value.string()
+		}
+	}
+
 	return Config{
 		cache_control:    cache_control.string()
 		expiration_delay: expiration_delay.int()
 		compression:      compression.bool()
+		headers:          headers
 	}
 }
 
-// set_headers adds the configured headers to a response.
-fn (config Config) set_headers(mut ctx Context) {
+// set_common_headers adds the headers every response gets. It must be called
+// once the response is prepared: veb sets its own `Server` header then.
+fn (config Config) set_common_headers(mut ctx Context) {
 	ctx.set_header(.server, server_name)
+	for name, value in config.headers {
+		ctx.set_custom_header(name, value) or {}
+	}
+}
+
+// set_headers adds the configured headers to the response for a file.
+fn (config Config) set_headers(mut ctx Context) {
+	config.set_common_headers(mut ctx)
 	ctx.set_header(.cache_control, config.cache_control)
 	ctx.set_header(.expires, time.utc().add_seconds(config.expiration_delay).http_header_string())
 }
@@ -230,9 +274,9 @@ fn (mut static_files StaticFiles) remove_hidden_directories() {
 
 // restrict_methods returns a middleware refusing the methods that make no
 // sense for static files, which veb would otherwise answer like a `GET`.
-fn restrict_methods() veb.MiddlewareOptions[Context] {
+fn restrict_methods(config Config) veb.MiddlewareOptions[Context] {
 	return veb.MiddlewareOptions[Context]{
-		handler: fn (mut ctx Context) bool {
+		handler: fn [config] (mut ctx Context) bool {
 			if ctx.req.method in allowed_methods {
 				return true
 			}
@@ -246,8 +290,7 @@ fn restrict_methods() veb.MiddlewareOptions[Context] {
 				ctx.res.set_status(.method_not_allowed)
 				ctx.text('405 Method Not Allowed')
 			}
-			// veb sets its own `Server` header when it prepares the response
-			ctx.set_header(.server, server_name)
+			config.set_common_headers(mut ctx)
 			return false
 		}
 	}
@@ -336,6 +379,24 @@ fn send_range(mut conn net.TcpConn, head string, file os.File, start i64, length
 	}
 }
 
+// not_found_pages returns a middleware answering the requests for a path
+// which is not served, with the headers of the configuration.
+fn not_found_pages(static_files &StaticFiles, config Config, folder string) veb.MiddlewareOptions[Context] {
+	return veb.MiddlewareOptions[Context]{
+		handler: fn [static_files, config, folder] (mut ctx Context) bool {
+			url := urllib.parse(ctx.req.url) or { return true }
+			if _ := static_files.find_file(url.path) {
+				return true
+			}
+
+			ctx.res.set_status(.not_found)
+			ctx.html(not_found_page(folder))
+			config.set_common_headers(mut ctx)
+			return false
+		}
+	}
+}
+
 // redirect_to_directories returns a middleware redirecting the request for
 // a directory with an index to its path with a trailing slash, which veb
 // answers with a 404. The page is not served directly: without the slash, its
@@ -389,8 +450,7 @@ fn serve_ranges(static_files &StaticFiles, config Config, mut streams sync.Semap
 				ctx.res.set_status(.requested_range_not_satisfiable)
 				ctx.set_header(.content_range, 'bytes */${size}')
 				ctx.text('')
-				// veb sets its own `Server` header when it prepares the response
-				ctx.set_header(.server, server_name)
+				config.set_common_headers(mut ctx)
 				return false
 			}
 
@@ -627,8 +687,9 @@ fn main() {
 			eprintln('warning: compression is disabled: ${err.msg()}')
 		}
 	}
-	static_files.use(restrict_methods())
+	static_files.use(restrict_methods(config))
 	static_files.use(redirect_to_directories(static_files, config))
+	static_files.use(not_found_pages(static_files, config, folder))
 	mut range_streams := sync.new_semaphore_init(max_range_streams)
 	static_files.use(serve_ranges(static_files, config, mut range_streams))
 	static_files.use(custom_headers(config))

@@ -163,6 +163,13 @@ fn test_invalid_headers_file_is_reported_at_startup() ! {
 		'wrong_cache':       'cache_control = 42'
 		'wrong_delay':       'expiration_delay = "one hour"'
 		'wrong_compression': 'compression = "gzip"'
+		'headers_not_table': 'headers = "X-Frame-Options: DENY"'
+		'header_not_string': '[headers]\nX-Frame-Options = 1'
+		'reserved_header':   '[headers]\nContent-Length = "0"'
+		'invalid_header':    '[headers]\n"X Frame Options" = "DENY"'
+		'hop_by_hop_header': '[headers]\nUpgrade = "h2c"'
+		'duplicate_header':  '[headers]\nX-Frame-Options = "DENY"\nx-frame-options = "DENY"'
+		'control_character': '[headers]\nX-Frame-Options = "DENY\\u0001"'
 	} {
 		work_dir := make_site(name)
 		os.write_file(os.join_path(work_dir, 'headers.toml'), content)!
@@ -548,6 +555,37 @@ fn test_text_files_are_compressed_when_enabled() ! {
 		server.process.wait()
 		assert !server.process.stderr_slurp().contains('warning'), name
 		server.process.close()
+	}
+}
+
+fn test_custom_headers_are_sent_with_every_response() ! {
+	work_dir := make_site('custom_headers')
+	os.write_file(os.join_path(work_dir, 'site', 'digits.txt'), '0123456789')!
+	os.write_file(os.join_path(work_dir, 'headers.toml'), '[headers]\nContent-Security-Policy = "default-src \'self\'"\nX-Frame-Options = "DENY"')!
+	mut server := start_server(work_dir)
+	defer {
+		server.stop()
+	}
+	etag := header(http.get(server.url)!, .etag)
+
+	mut responses := map[string]http.Response{}
+	responses['200'] = http.get(server.url)!
+	responses['200 HEAD'] = http.head(server.url)!
+	responses['204'] = http.fetch(url: server.url, method: .options)!
+	responses['206'] = get_range(server.url + '/digits.txt', 'bytes=2-5')!
+	responses['301'] = http.fetch(url: server.url + '/css', allow_redirect: false)!
+	mut request_header := http.new_header()
+	request_header.add(.if_none_match, etag)
+	responses['304'] = http.fetch(url: server.url, header: request_header)!
+	responses['404'] = http.get(server.url + '/nope')!
+	responses['405'] = http.post(server.url, 'a=b')!
+	responses['416'] = get_range(server.url + '/digits.txt', 'bytes=50-')!
+
+	for name, res in responses {
+		assert res.status_code == name.int(), name
+		assert (res.header.get_custom('Content-Security-Policy') or { '' }) == "default-src 'self'", name
+		assert (res.header.get_custom('X-Frame-Options') or { '' }) == 'DENY', name
+		assert header(res, .server) == server_name, name
 	}
 }
 

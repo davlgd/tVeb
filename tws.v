@@ -307,6 +307,33 @@ fn send_range(mut conn net.TcpConn, head string, file os.File, start i64, length
 	}
 }
 
+// redirect_to_directories returns a middleware redirecting the request for
+// a directory with an index to its path with a trailing slash, which veb
+// answers with a 404. The page is not served directly: without the slash, its
+// relative links would be resolved against the parent directory.
+fn redirect_to_directories(static_files &StaticFiles, config HeadersConfig) veb.MiddlewareOptions[Context] {
+	return veb.MiddlewareOptions[Context]{
+		handler: fn [static_files, config] (mut ctx Context) bool {
+			url := urllib.parse(ctx.req.url) or { return true }
+			// a host in the request target, like in `//host/path`, would end up
+			// in the redirection: such a request is not redirected, even when
+			// the host is this server
+			if url.host != '' || !url.path.starts_with('/') || url.path.starts_with('//')
+				|| url.path.ends_with('/') || url.path in static_files.static_files {
+				return true
+			}
+			static_files.find_file(url.path + '/') or { return true }
+
+			query := if url.raw_query == '' { '' } else { '?${url.raw_query}' }
+			ctx.redirect('${url.escaped_path()}/${query}', typ: .moved_permanently)
+			// a browser would otherwise keep the redirection forever; veb also
+			// sets its own `Server` header when it prepares the response
+			config.set_headers(mut ctx)
+			return false
+		}
+	}
+}
+
 // serve_ranges returns a middleware answering the `GET` requests for a single
 // range of a file, which veb ignores: it streams the files and always sends
 // them entirely. Any other request is left to veb.
@@ -408,6 +435,7 @@ fn main() {
 	static_files.handle_static(folder, true)!
 	static_files.remove_hidden_directories()
 	static_files.use(restrict_methods())
+	static_files.use(redirect_to_directories(static_files, headers_config))
 	static_files.use(serve_ranges(static_files, headers_config))
 	static_files.use(custom_headers(headers_config))
 

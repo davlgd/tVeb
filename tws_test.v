@@ -1,5 +1,6 @@
 module main
 
+import io
 import os
 import net
 import net.http
@@ -370,6 +371,49 @@ fn test_large_ranges_are_sent_entirely() ! {
 	updated := get_range(server.url + '/large.txt', 'bytes=1000-')!
 	assert updated.body == content[1000..] + 'more'
 	assert header(updated, .etag) != etag
+}
+
+fn test_directories_without_a_trailing_slash_are_redirected() ! {
+	mut server := start_server(make_site('directories'))
+	defer {
+		server.stop()
+	}
+
+	for path, location in {
+		'/css':     '/css/'
+		'/css?a=b': '/css/?a=b'
+	} {
+		for method in [http.Method.get, .head] {
+			res := http.fetch(url: server.url + path, method: method, allow_redirect: false)!
+			assert res.status_code == 301, '${method} ${path}'
+			assert header(res, .location) == location, '${method} ${path}'
+			assert header(res, .cache_control) == 'public, max-age=3600', '${method} ${path}'
+			assert res.header.contains(.expires), '${method} ${path}'
+			assert header(res, .server) == server_name, '${method} ${path}'
+		}
+	}
+	assert http.get(server.url + '/css')!.body == '<h1>CSS</h1>'
+
+	// nothing to redirect to, or a redirection which would leave the site
+	for path, status in {
+		'/css/':         200
+		'/css/main.css': 200
+		'/nope':         404
+	} {
+		res := http.fetch(url: server.url + path, allow_redirect: false)!
+		assert res.status_code == status, path
+		assert !res.header.contains(.location), path
+	}
+
+	// the HTTP client normalizes these targets: they are sent as they are
+	for target in ['//css', '//example.com', '//example.com/css', 'http://example.com/css'] {
+		mut conn := net.dial_tcp(server.url.all_after('://'))!
+		conn.write_string('GET ${target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n')!
+		response := io.read_all(reader: conn)!.bytestr()
+		conn.close()!
+		assert response.starts_with('HTTP/1.1 404 '), target
+		assert !response.to_lower().contains('location:'), target
+	}
 }
 
 fn test_not_found_pages() ! {

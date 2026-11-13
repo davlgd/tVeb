@@ -425,10 +425,7 @@ fn test_directories_without_a_trailing_slash_are_redirected() ! {
 
 	// the HTTP client normalizes these targets: they are sent as they are
 	for target in ['//css', '//example.com', '//example.com/css', 'http://example.com/css'] {
-		mut conn := net.dial_tcp(server.url.all_after('://'))!
-		conn.write_string('GET ${target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n')!
-		response := io.read_all(reader: conn)!.bytestr()
-		conn.close()!
+		response := get_raw(server, target)!
 		assert response.starts_with('HTTP/1.1 404 '), target
 		assert !response.to_lower().contains('location:'), target
 	}
@@ -644,6 +641,116 @@ fn test_requests_are_logged_when_enabled() ! {
 			'{"method":"GET","path":"/nope","status":404,"bytes":24}',
 			'{"method":"POST","path":"/","status":405,"bytes":22}',
 		]
+	}
+}
+
+// get_raw sends a request target as it is: the HTTP client normalizes them.
+fn get_raw(server TestServer, target string) !string {
+	mut conn := net.dial_tcp(server.url.all_after('://'))!
+	conn.write_string('GET ${target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n')!
+	response := io.read_all(reader: conn)!.bytestr()
+	conn.close()!
+	return response
+}
+
+fn test_files_without_extension_are_served() ! {
+	work_dir := make_site('no_extension')
+	site := os.join_path(work_dir, 'site')
+	os.write_file(os.join_path(site, 'LICENSE'), 'MIT License')!
+	os.write_file_array(os.join_path(site, 'css', 'blob'), []u8{len: 64, init: u8(index)})!
+	mut server := start_server(work_dir)
+	defer {
+		server.stop()
+	}
+
+	for method in [http.Method.get, .head] {
+		res := http.fetch(url: server.url + '/LICENSE', method: method)!
+		assert res.status_code == 200, method.str()
+		assert header(res, .content_type) == 'text/plain; charset=utf-8', method.str()
+		assert header(res, .content_length) == '11', method.str()
+		assert header(res, .server) == server_name, method.str()
+		assert header(res, .cache_control) == 'public, max-age=3600', method.str()
+		assert res.header.contains(.etag), method.str()
+	}
+	assert http.get(server.url + '/LICENSE')!.body == 'MIT License'
+	assert header(http.get(server.url + '/css/blob')!, .content_type) == default_mime_type
+
+	// a page or a document with scripts is not run without its extension
+	for name, content in {
+		'page':    '<!DOCTYPE html><html><script>alert(1)</script></html>'
+		'drawing': '<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"><script/></svg>'
+	} {
+		os.write_file(os.join_path(site, name), content)!
+		res := http.get(server.url + '/' + name)!
+		assert res.body == content, name
+		assert header(res, .content_type) == 'text/plain; charset=utf-8', name
+	}
+
+	$if !windows {
+		// a named pipe would block the server when it is opened
+		assert os.exec(['mkfifo', os.join_path(site, 'pipe')]).exit_code == 0
+		assert http.get(server.url + '/pipe')!.status_code == 404
+		assert http.get(server.url)!.status_code == 200
+	}
+
+	range := get_range(server.url + '/LICENSE', 'bytes=4-10')!
+	assert range.status_code == 206
+	assert range.body == 'License'
+	assert header(range, .content_type) == 'text/plain; charset=utf-8'
+
+	mut request_header := http.new_header()
+	request_header.add(.if_none_match, header(http.get(server.url + '/LICENSE')!, .etag))
+	assert http.fetch(url: server.url + '/LICENSE', header: request_header)!.status_code == 304
+}
+
+fn test_files_added_or_removed_since_startup() ! {
+	work_dir := make_site('changes')
+	site := os.join_path(work_dir, 'site')
+	os.write_file(os.join_path(work_dir, 'outside.txt'), 'secret')!
+	os.rm(os.join_path(site, 'index.html'))!
+	mut server := start_server(work_dir)
+	defer {
+		server.stop()
+	}
+
+	assert http.get(server.url)!.status_code == 404
+	os.write_file(os.join_path(site, 'index.html'), '<h1>Hello</h1>')!
+	assert http.get(server.url)!.body == '<h1>Hello</h1>'
+	assert http.get(server.url + '/index.html')!.body == '<h1>Hello</h1>'
+
+	os.mkdir_all(os.join_path(site, 'blog', '.drafts'))!
+	os.write_file(os.join_path(site, 'blog', 'index.html'), '<h1>Blog</h1>')!
+	os.write_file(os.join_path(site, 'blog', 'data.unknown'), 'data')!
+	os.write_file(os.join_path(site, 'blog', '.drafts', 'post.html'), 'secret')!
+	os.write_file(os.join_path(site, 'LICENSE'), 'secret')!
+	os.write_file(os.join_path(site, '.env'), 'secret')!
+
+	page := http.get(server.url + '/blog/')!
+	assert page.status_code == 200
+	assert page.body == '<h1>Blog</h1>'
+	assert header(page, .content_type) == 'text/html'
+	assert header(page, .server) == server_name
+	assert header(http.get(server.url + '/blog/data.unknown')!, .content_type) == default_mime_type
+	redirection := http.fetch(url: server.url + '/blog', allow_redirect: false)!
+	assert redirection.status_code == 301
+	assert header(redirection, .location) == '/blog/'
+	assert http.post(server.url + '/blog/', 'a=b')!.status_code == 405
+
+	// hidden files, and what is outside the served folder
+	for target in ['/.env', '/blog/.drafts/post.html', '/../outside.txt', '/blog/../../outside.txt',
+		'/%2e%2e/outside.txt', '/..%2foutside.txt', '/..\\outside.txt', '/%5c..%5coutside.txt',
+		'//outside.txt', '//localhost/LICENSE', '/blog/index.html/', '/blog/index.html%00'] {
+		response := get_raw(server, target)!
+		assert response.starts_with('HTTP/1.1 404 '), target
+		assert !response.contains('secret'), target
+	}
+
+	os.rm(os.join_path(site, 'css', 'index.html'))!
+	os.rm(os.join_path(site, 'css', 'main.css'))!
+	for path in ['/css/', '/css/main.css', '/css'] {
+		res := http.fetch(url: server.url + path, allow_redirect: false)!
+		assert res.status_code == 404, path
+		assert res.body == '<h1>Page not found!</h1>', path
 	}
 }
 

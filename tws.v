@@ -24,6 +24,9 @@ const reserved_headers = ['accept-ranges', 'allow', 'cache-control', 'connection
 	'last-modified', 'location', 'proxy-connection', 'server', 'te', 'trailer', 'transfer-encoding',
 	'upgrade', 'vary']!
 const default_mime_type = 'application/octet-stream'
+const index_files = ['index.html', 'index.htm']!
+const windows_devices = ['CON', 'PRN', 'AUX', 'NUL', 'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6',
+	'COM7', 'COM8', 'COM9', 'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9']!
 // The kinds of files worth compressing, the other ones already are.
 const compressible_extensions = ['.css', '.csv', '.eot', '.htm', '.html', '.ico', '.ics', '.js',
 	'.json', '.jsonld', '.md', '.mjs', '.otf', '.svg', '.ttf', '.txt', '.wasm', '.xhtml', '.xml']!
@@ -71,6 +74,7 @@ pub fn (mut app App) init_server(server &veb.Server) {
 pub struct StaticFiles {
 	veb.StaticHandler
 	veb.Middleware[Context]
+	folder string
 }
 
 fn print_help() {
@@ -348,18 +352,132 @@ fn (mut cache EtagCache) get(file string) !string {
 	return etag
 }
 
-// find_file returns the path of the file veb serves for a request path.
-fn (static_files &StaticFiles) find_file(request_path string) ?string {
+// find_registered_file returns the path of the file veb serves for a request
+// path: one of those it found when the server started.
+fn (static_files &StaticFiles) find_registered_file(request_path string) ?string {
 	if !request_path.ends_with('/') {
 		return static_files.static_files[request_path] or { return none }
 	}
 
-	for index in ['index.html', 'index.htm'] {
+	for index in index_files {
 		if file := static_files.static_files[request_path + index] {
 			return file
 		}
 	}
 	return none
+}
+
+// find_unregistered_file looks in the served folder for a file veb does not
+// know: one without extension, or added since the server started. Nothing is
+// found in a hidden directory, `.well-known` excepted, nor outside the folder.
+// Symbolic links are followed, like veb does when it scans the folder.
+fn (static_files &StaticFiles) find_unregistered_file(request_path string) ?string {
+	if !request_path.starts_with('/') || request_path.contains('\\')
+		|| request_path.contains('\0') {
+		return none
+	}
+
+	is_directory := request_path.ends_with('/')
+	segments := if request_path == '/' {
+		[]string{}
+	} else {
+		request_path.trim('/').split('/')
+	}
+	for i, segment in segments {
+		is_file_name := !is_directory && i == segments.len - 1
+		if segment == '' || (segment.starts_with('.') && (is_file_name || segment != '.well-known'))
+			|| is_other_name(segment) {
+			return none
+		}
+	}
+
+	path := os.join_path(static_files.folder, ...segments)
+	if !is_directory {
+		return if is_regular_file(path) { path } else { none }
+	}
+	for index in index_files {
+		if is_regular_file(os.join_path(path, index)) {
+			return os.join_path(path, index)
+		}
+	}
+	return none
+}
+
+// is_regular_file tells if a path is a file which can be sent: a named pipe
+// or a device, for instance, would block the server when it is opened.
+fn is_regular_file(path string) bool {
+	attributes := os.stat(path) or { return false }
+	return attributes.get_filetype() == .regular
+}
+
+// is_other_name tells if a name could designate, on Windows, something else
+// than the entry of this name: a hidden file by its short name, another
+// stream of a file, or a device.
+fn is_other_name(name string) bool {
+	$if windows {
+		return name.contains_any(':~') || name.ends_with('.') || name.ends_with(' ')
+			|| name.all_before('.').to_upper() in windows_devices
+	}
+	return false
+}
+
+// find_file returns the path of the file to serve for a request path.
+fn (static_files &StaticFiles) find_file(request_path string) ?string {
+	if file := static_files.find_registered_file(request_path) {
+		// it may have been removed since the server started
+		if os.exists(file) {
+			return file
+		}
+	}
+	return static_files.find_unregistered_file(request_path)
+}
+
+// content_type returns the type of a file from its extension, or from its
+// first bytes when it has none.
+fn (static_files &StaticFiles) content_type(file string) string {
+	ext := os.file_ext(file).to_lower()
+	if ext != '' {
+		return static_files.static_mime_types[ext] or {
+			veb.mime_types[ext] or { default_mime_type }
+		}
+	}
+
+	mut reader := os.open(file) or { return default_mime_type }
+	defer {
+		reader.close()
+	}
+	mut head := []u8{len: 512}
+	read := reader.read(mut head) or { 0 }
+	sniffed := http.detect_content_type(head[..read])
+	// a page or a document with scripts must be named as such to be run
+	return if sniffed.contains('html') || sniffed.contains('xml') {
+		'text/plain; charset=utf-8'
+	} else {
+		sniffed
+	}
+}
+
+// serve_unregistered_files returns a middleware sending the files veb does not
+// know, and would answer with a 404.
+fn serve_unregistered_files(static_files &StaticFiles, config Config) veb.MiddlewareOptions[Context] {
+	return veb.MiddlewareOptions[Context]{
+		handler: fn [static_files, config] (mut ctx Context) bool {
+			url := urllib.parse(ctx.req.url) or { return true }
+			// veb does not read a host in a request target like `//host/path`
+			if url.host != '' && !ctx.req.url.contains('://') {
+				return true
+			}
+			if _ := static_files.find_registered_file(url.path) {
+				return true
+			}
+			file := static_files.find_unregistered_file(url.path) or { return true }
+
+			ctx.set_content_type(static_files.content_type(file))
+			ctx.file(file)
+			config.set_headers(mut ctx)
+			return false
+		}
+	}
 }
 
 // send_range writes a partial response, a chunk of the file at a time, on a
@@ -421,7 +539,10 @@ fn redirect_to_directories(static_files &StaticFiles, config Config) veb.Middlew
 			// in the redirection: such a request is not redirected, even when
 			// the host is this server
 			if url.host != '' || !url.path.starts_with('/') || url.path.starts_with('//')
-				|| url.path.ends_with('/') || url.path in static_files.static_files {
+				|| url.path.ends_with('/') {
+				return true
+			}
+			if _ := static_files.find_file(url.path) {
 				return true
 			}
 			static_files.find_file(url.path + '/') or { return true }
@@ -472,11 +593,8 @@ fn serve_ranges(static_files &StaticFiles, config Config, mut streams sync.Semap
 				return true
 			}
 
-			ext := os.file_ext(file).to_lower()
 			length := range.end - range.start + 1
-			ctx.set_header(.content_type, static_files.static_mime_types[ext] or {
-				veb.mime_types[ext]
-			})
+			ctx.set_header(.content_type, static_files.content_type(file))
 			ctx.set_header(.content_length, length.str())
 			ctx.set_header(.content_range, 'bytes ${range.start}-${range.end}/${size}')
 			ctx.set_header(.accept_ranges, 'bytes')
@@ -691,7 +809,9 @@ fn main() {
 		exit(1)
 	}
 
-	mut static_files := &StaticFiles{}
+	mut static_files := &StaticFiles{
+		folder: folder
+	}
 	static_files.register_unknown_mime_types(folder)
 	static_files.handle_static(folder, true)!
 	static_files.remove_hidden_directories()
@@ -709,6 +829,7 @@ fn main() {
 	static_files.use(not_found_pages(static_files, config, folder))
 	mut range_streams := sync.new_semaphore_init(max_range_streams)
 	static_files.use(serve_ranges(static_files, config, mut range_streams))
+	static_files.use(serve_unregistered_files(static_files, config))
 	static_files.use(custom_headers(config))
 
 	// The empty path is deliberate: with '/', veb strips it from the URL and

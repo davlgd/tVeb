@@ -9,6 +9,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - Rename the `error` variable to `error_msg` to fix a V compiler notice (it shadowed the builtin `error` function)
+- Not found pages (unknown paths) use the `404` status code, even with a `404.html` file, and the custom `Server` header; they no longer send `Cache-Control`, `Expires` and `Last-Modified` headers ([#2](https://github.com/davlgd/tVeb/issues/2))
+- `headers.toml` is optional and read once at startup: a missing file no longer crashes the server, an invalid one is reported before it starts ([#5](https://github.com/davlgd/tVeb/issues/5))
+- Custom headers from `headers.toml` are sent again with static files: recent V versions serve them before any middleware runs ([#1](https://github.com/davlgd/tVeb/issues/1))
+- Building from the repository root (`v -prod .`) works again with recent V versions, which no longer support the `src/` directory: sources are now at the root ([#3](https://github.com/davlgd/tVeb/issues/3))
+- A busy port is detected again before the server starts, on IPv4 and IPv6: veb no longer asks to kill the process using it ([#4](https://github.com/davlgd/tVeb/issues/4))
+- A file with an extension unknown to veb no longer prevents the server from starting: it is served as `application/octet-stream`. The content of hidden directories such as `.git` is not served, `.well-known` excepted ([#6](https://github.com/davlgd/tVeb/issues/6))
+- Requests with a method other than `GET` or `HEAD` are no longer answered like a `GET`: `OPTIONS` gets a `204` response and the other ones a `405`, both with an `Allow` header ([#7](https://github.com/davlgd/tVeb/issues/7))
+- The version declared in `v.mod` is up to date again, it was still `0.1.5` ([#9](https://github.com/davlgd/tVeb/issues/9))
+- `GET` requests for a single range of a file get a `206` partial response (`416` when it cannot be satisfied) instead of the whole file, which makes download resuming and media seeking work ([#8](https://github.com/davlgd/tVeb/issues/8))
+- A directory with an index requested without its trailing slash is redirected to it (`301`) instead of returning a `404` ([#17](https://github.com/davlgd/tVeb/issues/17))
 
 ## [0.2.0] - 2024-09-29
 

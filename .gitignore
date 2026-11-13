@@ -22,3 +22,6 @@ bin/
 # veb and database
 *.db
 *.js
+
+# Local clone of V, as done by the release workflow
+/v/

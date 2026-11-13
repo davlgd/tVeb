@@ -80,6 +80,15 @@ fn header(res http.Response, key http.CommonHeader) string {
 	return res.header.get(key) or { '' }
 }
 
+// get_options asks the server to close the connection: a 204 response has no
+// `Content-Length` header, and the HTTP client would wait for more on a
+// connection it reuses.
+fn get_options(url string) !http.Response {
+	mut request_header := http.new_header()
+	request_header.add(.connection, 'close')
+	return http.fetch(url: url, method: .options, header: request_header)
+}
+
 fn make_site(name string) string {
 	work_dir := os.join_path(test_dir, name)
 	os.mkdir_all(os.join_path(work_dir, 'site', 'css')) or { panic(err) }
@@ -163,6 +172,7 @@ fn test_invalid_headers_file_is_reported_at_startup() ! {
 		'wrong_cache':       'cache_control = 42'
 		'wrong_delay':       'expiration_delay = "one hour"'
 		'wrong_compression': 'compression = "gzip"'
+		'wrong_access_log':  'access_log = "stdout"'
 		'headers_not_table': 'headers = "X-Frame-Options: DENY"'
 		'header_not_string': '[headers]\nX-Frame-Options = 1'
 		'reserved_header':   '[headers]\nContent-Length = "0"'
@@ -274,7 +284,7 @@ fn test_only_get_and_head_methods_are_allowed() ! {
 			assert !res.body.contains('Hello'), '${method} ${path}'
 		}
 
-		options := http.fetch(url: server.url + path, method: .options)!
+		options := get_options(server.url + path)!
 		assert options.status_code == 204, path
 		assert header(options, .allow) == allow_header, path
 		assert header(options, .server) == server_name, path
@@ -571,7 +581,7 @@ fn test_custom_headers_are_sent_with_every_response() ! {
 	mut responses := map[string]http.Response{}
 	responses['200'] = http.get(server.url)!
 	responses['200 HEAD'] = http.head(server.url)!
-	responses['204'] = http.fetch(url: server.url, method: .options)!
+	responses['204'] = get_options(server.url)!
 	responses['206'] = get_range(server.url + '/digits.txt', 'bytes=2-5')!
 	responses['301'] = http.fetch(url: server.url + '/css', allow_redirect: false)!
 	mut request_header := http.new_header()
@@ -586,6 +596,54 @@ fn test_custom_headers_are_sent_with_every_response() ! {
 		assert (res.header.get_custom('Content-Security-Policy') or { '' }) == "default-src 'self'", name
 		assert (res.header.get_custom('X-Frame-Options') or { '' }) == 'DENY', name
 		assert header(res, .server) == server_name, name
+	}
+}
+
+fn test_requests_are_logged_when_enabled() ! {
+	work_dir := make_site('access_log')
+	os.write_file(os.join_path(work_dir, 'site', 'digits.txt'), '0123456789')!
+
+	for name, config in {
+		'disabled': ''
+		'enabled':  'access_log = true'
+	} {
+		os.write_file(os.join_path(work_dir, 'headers.toml'), config)!
+		mut server := start_server(work_dir)
+		http.get(server.url + '/css/main.css?token=secret')!
+		http.head(server.url)!
+		http.fetch(url: server.url + '/css', allow_redirect: false)!
+		get_range(server.url + '/digits.txt', 'bytes=2-5')!
+		http.get(server.url + '/nope')!
+		http.post(server.url, 'a=b')!
+
+		// the output of a process can only be read once it has exited
+		server.process.signal_kill()
+		server.process.wait()
+		lines := server.process.stdout_slurp().split_into_lines().filter(it.starts_with('{'))
+		server.process.close()
+
+		if name == 'disabled' {
+			assert lines.len == 0
+			continue
+		}
+		// the duration of a request varies, and the HTTP client may send one twice
+		mut logged := []string{}
+		for line in lines {
+			assert line.contains(',"latency_ms":'), line
+			entry := line.all_before(',"latency_ms":') + '}'
+			if entry !in logged {
+				logged << entry
+			}
+		}
+		assert logged == [
+			'{"method":"GET","path":"/","status":200,"bytes":14}',
+			'{"method":"GET","path":"/css/main.css","status":200,"bytes":7}',
+			'{"method":"HEAD","path":"/","status":200,"bytes":14}',
+			'{"method":"GET","path":"/css","status":301,"bytes":17}',
+			'{"method":"GET","path":"/digits.txt","status":206,"bytes":4}',
+			'{"method":"GET","path":"/nope","status":404,"bytes":24}',
+			'{"method":"POST","path":"/","status":405,"bytes":22}',
+		]
 	}
 }
 

@@ -50,6 +50,7 @@ struct Config {
 	cache_control    string = 'public, max-age=3600'
 	expiration_delay int    = 3600
 	compression      bool
+	access_log       bool
 	headers          map[string]string
 }
 
@@ -143,6 +144,7 @@ fn load_config(path string) !Config {
 	cache_control := doc.value('cache_control').default_to(defaults.cache_control)
 	expiration_delay := doc.value('expiration_delay').default_to(defaults.expiration_delay)
 	compression := doc.value('compression').default_to(defaults.compression)
+	access_log := doc.value('access_log').default_to(defaults.access_log)
 
 	if cache_control !is string {
 		return error('`cache_control` must be a string')
@@ -152,6 +154,9 @@ fn load_config(path string) !Config {
 	}
 	if compression !is bool {
 		return error('`compression` must be a boolean')
+	}
+	if access_log !is bool {
+		return error('`access_log` must be a boolean')
 	}
 
 	mut headers := map[string]string{}
@@ -185,24 +190,31 @@ fn load_config(path string) !Config {
 		cache_control:    cache_control.string()
 		expiration_delay: expiration_delay.int()
 		compression:      compression.bool()
+		access_log:       access_log.bool()
 		headers:          headers
 	}
 }
 
-// set_common_headers adds the headers every response gets. It must be called
-// once the response is prepared: veb sets its own `Server` header then.
-fn (config Config) set_common_headers(mut ctx Context) {
+// complete_response adds the headers every response gets, then logs it. It
+// must be called once the response is prepared: veb sets its own `Server`
+// header then.
+fn (config Config) complete_response(mut ctx Context) {
 	ctx.set_header(.server, server_name)
 	for name, value in config.headers {
 		ctx.set_custom_header(name, value) or {}
+	}
+	if config.access_log {
+		// written at once: `println` writes the line and its end separately,
+		// and the lines of two requests answered together would be mixed
+		print(veb.format_access_log(veb.AccessLogOptions{}, &ctx.Context) + '\n')
 	}
 }
 
 // set_headers adds the configured headers to the response for a file.
 fn (config Config) set_headers(mut ctx Context) {
-	config.set_common_headers(mut ctx)
 	ctx.set_header(.cache_control, config.cache_control)
 	ctx.set_header(.expires, time.utc().add_seconds(config.expiration_delay).http_header_string())
+	config.complete_response(mut ctx)
 }
 
 // custom_headers returns a middleware adding the configured headers to a response.
@@ -290,7 +302,7 @@ fn restrict_methods(config Config) veb.MiddlewareOptions[Context] {
 				ctx.res.set_status(.method_not_allowed)
 				ctx.text('405 Method Not Allowed')
 			}
-			config.set_common_headers(mut ctx)
+			config.complete_response(mut ctx)
 			return false
 		}
 	}
@@ -391,7 +403,7 @@ fn not_found_pages(static_files &StaticFiles, config Config, folder string) veb.
 
 			ctx.res.set_status(.not_found)
 			ctx.html(not_found_page(folder))
-			config.set_common_headers(mut ctx)
+			config.complete_response(mut ctx)
 			return false
 		}
 	}
@@ -450,7 +462,7 @@ fn serve_ranges(static_files &StaticFiles, config Config, mut streams sync.Semap
 				ctx.res.set_status(.requested_range_not_satisfiable)
 				ctx.set_header(.content_range, 'bytes */${size}')
 				ctx.text('')
-				config.set_common_headers(mut ctx)
+				config.complete_response(mut ctx)
 				return false
 			}
 
@@ -462,7 +474,6 @@ fn serve_ranges(static_files &StaticFiles, config Config, mut streams sync.Semap
 
 			ext := os.file_ext(file).to_lower()
 			length := range.end - range.start + 1
-			config.set_headers(mut ctx)
 			ctx.set_header(.content_type, static_files.static_mime_types[ext] or {
 				veb.mime_types[ext]
 			})
@@ -473,6 +484,8 @@ fn serve_ranges(static_files &StaticFiles, config Config, mut streams sync.Semap
 			ctx.set_header(.last_modified, time.unix(os.file_last_mod_unix(file)).http_header_string())
 			ctx.set_header(.vary, 'Accept-Encoding')
 			ctx.set_header(.connection, 'close')
+			ctx.res.set_status(.partial_content)
+			config.set_headers(mut ctx)
 			head := 'HTTP/1.1 206 Partial Content\r\n${ctx.res.header.render(version: .v1_1)}\r\n'
 
 			// veb streams the whole files without loading them, but can only
@@ -682,6 +695,10 @@ fn main() {
 	static_files.register_unknown_mime_types(folder)
 	static_files.handle_static(folder, true)!
 	static_files.remove_hidden_directories()
+	if config.access_log {
+		// records when a request arrives, for the duration written in its log
+		static_files.use(veb.access_log[Context]().stamp())
+	}
 	if config.compression {
 		static_files.enable_compression(config) or {
 			eprintln('warning: compression is disabled: ${err.msg()}')

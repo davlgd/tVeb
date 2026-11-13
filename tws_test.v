@@ -277,6 +277,101 @@ fn test_only_get_and_head_methods_are_allowed() ! {
 	assert http.head(server.url)!.status_code == 200
 }
 
+fn get_range(url string, range string) !http.Response {
+	mut request_header := http.new_header()
+	request_header.add(.range, range)
+	return http.fetch(url: url, header: request_header)
+}
+
+fn test_range_requests() ! {
+	work_dir := make_site('ranges')
+	os.write_file(os.join_path(work_dir, 'site', 'digits.txt'), '0123456789')!
+	mut server := start_server(work_dir)
+	defer {
+		server.stop()
+	}
+	url := server.url + '/digits.txt'
+
+	for range, expected in {
+		'bytes=2-5':   ['2345', 'bytes 2-5/10']
+		'bytes=7-':    ['789', 'bytes 7-9/10']
+		'bytes=-3':    ['789', 'bytes 7-9/10']
+		'bytes=5-100': ['56789', 'bytes 5-9/10']
+	} {
+		res := get_range(url, range)!
+		assert res.status_code == 206, range
+		assert res.body == expected[0], range
+		assert header(res, .content_range) == expected[1], range
+		assert header(res, .content_length) == expected[0].len.str(), range
+		assert header(res, .content_type) == 'text/plain', range
+		assert header(res, .server) == server_name, range
+		assert header(res, .cache_control) == 'public, max-age=3600', range
+		assert res.header.contains(.etag), range
+		assert res.header.contains(.last_modified), range
+	}
+
+	index := get_range(server.url, 'bytes=1-3')!
+	assert index.status_code == 206
+	assert index.body == 'h1>'
+
+	unsatisfiable := get_range(url, 'bytes=50-')!
+	assert unsatisfiable.status_code == 416
+	assert header(unsatisfiable, .content_range) == 'bytes */10'
+	assert header(unsatisfiable, .server) == server_name
+	assert !unsatisfiable.header.contains(.cache_control)
+
+	// veb answers the requests which are not for a single valid range
+	for range in ['bytes=0-1,3-4', 'lines=1-2', 'bytes=5-2'] {
+		res := get_range(url, range)!
+		assert res.status_code == 200, range
+		assert res.body == '0123456789', range
+	}
+
+	etag := header(http.get(url)!, .etag)
+	assert header(get_range(url, 'bytes=2-5')!, .etag) == etag
+	for validator, status in {
+		etag:      206
+		'"stale"': 200
+	} {
+		mut request_header := http.new_header()
+		request_header.add(.range, 'bytes=2-5')
+		request_header.add(.if_range, validator)
+		assert http.fetch(url: url, header: request_header)!.status_code == status, validator
+	}
+
+	for precondition in preconditions {
+		mut request_header := http.new_header()
+		request_header.add(.range, 'bytes=2-5')
+		request_header.add(precondition, '"other"')
+		res := http.fetch(url: url, header: request_header)!
+		assert res.status_code != 206, precondition.str()
+	}
+
+	assert get_range(server.url + '/nope', 'bytes=2-5')!.status_code == 404
+}
+
+fn test_large_ranges_are_sent_entirely() ! {
+	work_dir := make_site('large_ranges')
+	content := '0123456789abcdef'.repeat(3 * range_chunk_size / 16 + 1)
+	os.write_file(os.join_path(work_dir, 'site', 'large.txt'), content)!
+	mut server := start_server(work_dir)
+	defer {
+		server.stop()
+	}
+
+	res := get_range(server.url + '/large.txt', 'bytes=1000-')!
+	assert res.status_code == 206
+	assert res.body.len == content.len - 1000
+	assert res.body == content[1000..]
+
+	// the file is modified: its cached ETag must not be used anymore
+	etag := header(res, .etag)
+	os.write_file(os.join_path(work_dir, 'site', 'large.txt'), content + 'more')!
+	updated := get_range(server.url + '/large.txt', 'bytes=1000-')!
+	assert updated.body == content[1000..] + 'more'
+	assert header(updated, .etag) != etag
+}
+
 fn test_not_found_pages() ! {
 	work_dir := make_site('not_found')
 	mut server := start_server(work_dir)

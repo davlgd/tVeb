@@ -250,6 +250,33 @@ fn test_hidden_directories_are_not_served() ! {
 	assert http.get(server.url + '/.well-known/security.txt')!.body == 'public'
 }
 
+fn test_only_get_and_head_methods_are_allowed() ! {
+	mut server := start_server(make_site('methods'))
+	defer {
+		server.stop()
+	}
+
+	for path in ['/', '/css/main.css', '/nope'] {
+		for method in [http.Method.post, .put, .patch, .delete] {
+			res := http.fetch(url: server.url + path, method: method, data: 'a=b')!
+			assert res.status_code == 405, '${method} ${path}'
+			assert header(res, .allow) == allow_header, '${method} ${path}'
+			assert header(res, .server) == server_name, '${method} ${path}'
+			assert !res.body.contains('Hello'), '${method} ${path}'
+		}
+
+		options := http.fetch(url: server.url + path, method: .options)!
+		assert options.status_code == 204, path
+		assert header(options, .allow) == allow_header, path
+		assert header(options, .server) == server_name, path
+		assert !options.header.contains(.content_length), path
+		assert options.body == '', path
+	}
+
+	assert http.get(server.url)!.status_code == 200
+	assert http.head(server.url)!.status_code == 200
+}
+
 fn test_not_found_pages() ! {
 	work_dir := make_site('not_found')
 	mut server := start_server(work_dir)

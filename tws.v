@@ -5,6 +5,7 @@ import net
 import toml
 import time
 import veb
+import net.http
 
 pub struct Context {
 	veb.Context
@@ -12,6 +13,8 @@ pub struct Context {
 
 const server_name = 'Tiniest Veb Server'
 const default_mime_type = 'application/octet-stream'
+const allowed_methods = [http.Method.get, .head]!
+const allow_header = 'GET, HEAD, OPTIONS'
 
 struct HeadersConfig {
 	cache_control    string = 'public, max-age=3600'
@@ -182,6 +185,31 @@ fn (mut static_files StaticFiles) remove_hidden_directories() {
 	}
 }
 
+// restrict_methods returns a middleware refusing the methods that make no
+// sense for static files, which veb would otherwise answer like a `GET`.
+fn restrict_methods() veb.MiddlewareOptions[Context] {
+	return veb.MiddlewareOptions[Context]{
+		handler: fn (mut ctx Context) bool {
+			if ctx.req.method in allowed_methods {
+				return true
+			}
+
+			ctx.set_header(.allow, allow_header)
+			if ctx.req.method == .options {
+				ctx.no_content()
+				// a 204 response must not have a `Content-Length` header
+				ctx.res.header.delete(.content_length)
+			} else {
+				ctx.res.set_status(.method_not_allowed)
+				ctx.text('405 Method Not Allowed')
+			}
+			// veb sets its own `Server` header when it prepares the response
+			ctx.set_header(.server, server_name)
+			return false
+		}
+	}
+}
+
 fn main() {
 	folder, port, error_msg := get_settings()
 
@@ -220,6 +248,7 @@ fn main() {
 	static_files.register_unknown_mime_types(folder)
 	static_files.handle_static(folder, true)!
 	static_files.remove_hidden_directories()
+	static_files.use(restrict_methods())
 	static_files.use(custom_headers(headers_config))
 
 	// The empty path is deliberate: with '/', veb strips it from the URL and

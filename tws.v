@@ -2,6 +2,7 @@ module main
 
 import os
 import sync
+import sync.stdatomic
 import net
 import toml
 import time
@@ -21,6 +22,13 @@ const range_chunk_size = 64 * 1024
 // Each range is sent by its own thread: above this number of ranges being
 // sent, a request for a range gets the whole file, streamed by veb.
 const max_range_streams = 64
+// The time given to the requests being answered when the server is stopped,
+// a bit less than the 10 seconds `docker stop` waits before killing it.
+const shutdown_timeout = time.Duration(8 * time.second)
+// Set by the handler of the termination signals, which can't do more safely.
+const stop_requested = stdatomic.new_atomic(false)
+// When the server began to stop, in milliseconds since the Unix epoch.
+const stop_started_at = stdatomic.new_atomic(i64(0))
 // A request with one of these headers is not answered with a range.
 const preconditions = [http.CommonHeader.if_match, .if_none_match, .if_modified_since,
 	.if_unmodified_since]!
@@ -32,6 +40,13 @@ struct HeadersConfig {
 
 pub struct App {
 	veb.Controller
+mut:
+	server &veb.Server = unsafe { nil }
+}
+
+// init_server is called by veb with the handle used to stop the server.
+pub fn (mut app App) init_server(server &veb.Server) {
+	app.server = server
 }
 
 // StaticFiles serves the files through a controller: veb serves the static
@@ -337,9 +352,8 @@ fn redirect_to_directories(static_files &StaticFiles, config HeadersConfig) veb.
 // serve_ranges returns a middleware answering the `GET` requests for a single
 // range of a file, which veb ignores: it streams the files and always sends
 // them entirely. Any other request is left to veb.
-fn serve_ranges(static_files &StaticFiles, config HeadersConfig) veb.MiddlewareOptions[Context] {
+fn serve_ranges(static_files &StaticFiles, config HeadersConfig, mut streams sync.Semaphore) veb.MiddlewareOptions[Context] {
 	mut etags := &EtagCache{}
-	mut streams := sync.new_semaphore_init(max_range_streams)
 
 	return veb.MiddlewareOptions[Context]{
 		handler: fn [static_files, config, mut etags, mut streams] (mut ctx Context) bool {
@@ -396,6 +410,47 @@ fn serve_ranges(static_files &StaticFiles, config HeadersConfig) veb.MiddlewareO
 	}
 }
 
+fn request_stop(_ os.Signal) {
+	mut requested := stop_requested
+	requested.store(true)
+}
+
+// stop_on_signal waits for a termination signal, then stops the server: veb
+// stops accepting connections and answers the requests it already received.
+fn (app &App) stop_on_signal() {
+	mut requested := stop_requested
+	for !requested.load() {
+		time.sleep(100 * time.millisecond)
+	}
+
+	println('Stopping the server...')
+	mut started_at := stop_started_at
+	started_at.store(time.now().unix_milli())
+	if app.server == unsafe { nil } {
+		exit(0)
+	}
+	// veb ignores a shutdown asked before it is running
+	app.server.wait_till_running() or {}
+	app.server.shutdown(timeout: shutdown_timeout) or {
+		eprintln('error: ${err.msg()}')
+		exit(1)
+	}
+}
+
+// wait_for_range_streams waits for the ranges being sent, which veb does not
+// know about: once every stream slot is free, none of them is still running.
+fn wait_for_range_streams(mut streams sync.Semaphore) {
+	mut started_at := stop_started_at
+	deadline := started_at.load() + shutdown_timeout.milliseconds()
+	for _ in 0 .. max_range_streams {
+		remaining := (deadline - time.now().unix_milli()) * time.millisecond
+		if remaining <= 0 || !streams.timed_wait(remaining) {
+			eprintln('error: some range requests were still being answered')
+			exit(1)
+		}
+	}
+}
+
 fn main() {
 	folder, port, error_msg := get_settings()
 
@@ -436,13 +491,30 @@ fn main() {
 	static_files.remove_hidden_directories()
 	static_files.use(restrict_methods())
 	static_files.use(redirect_to_directories(static_files, headers_config))
-	static_files.use(serve_ranges(static_files, headers_config))
+	mut range_streams := sync.new_semaphore_init(max_range_streams)
+	static_files.use(serve_ranges(static_files, headers_config, mut range_streams))
 	static_files.use(custom_headers(headers_config))
 
 	// The empty path is deliberate: with '/', veb strips it from the URL and
 	// `GET /` would not match the root index anymore.
 	mut app := &App{}
 	app.register_controller[StaticFiles, Context]('', mut static_files)!
+
+	os.signal_opt(.int, request_stop)!
+	os.signal_opt(.term, request_stop)!
+	$if !windows {
+		// sent when the terminal which started the server is closed
+		os.signal_opt(.hup, request_stop)!
+	}
+	spawn app.stop_on_signal()
+
 	println("Server is started, serving '${folder}' folder")
 	veb.run[App, Context](mut app, port)
+	mut requested := stop_requested
+	if !requested.load() {
+		eprintln('error: the server stopped unexpectedly')
+		exit(1)
+	}
+	wait_for_range_streams(mut range_streams)
+	println('Server stopped')
 }

@@ -416,6 +416,55 @@ fn test_directories_without_a_trailing_slash_are_redirected() ! {
 	}
 }
 
+fn test_server_stops_on_a_termination_signal() ! {
+	$if windows {
+		return
+	}
+	mut server := start_server(make_site('stop'))
+	server.process.signal_term()
+	exited := wait_for_exit(mut server.process)
+	output := server.process.stdout_slurp()
+	server.stop()
+
+	assert exited, 'the server is still running'
+	assert server.process.code == 0
+	assert output.contains('Server stopped')
+}
+
+fn test_requests_being_answered_are_completed_when_the_server_stops() ! {
+	$if windows {
+		return
+	}
+	work_dir := make_site('stop_while_sending')
+	content := '0123456789abcdef'.repeat(1024 * 1024)
+	os.write_file(os.join_path(work_dir, 'site', 'large.txt'), content)!
+
+	// a whole file is sent by veb, a range by this server
+	for name, range in {
+		'file':  ''
+		'range': 'Range: bytes=16-\r\n'
+	} {
+		mut server := start_server(work_dir)
+		mut conn := net.dial_tcp(server.url.all_after('://'))!
+		conn.write_string('GET /large.txt HTTP/1.1\r\nHost: localhost\r\n${range}Connection: close\r\n\r\n')!
+		mut first_bytes := []u8{len: 1024}
+		read := conn.read(mut first_bytes)!
+		server.process.signal_term()
+		time.sleep(300 * time.millisecond)
+		rest := io.read_all(reader: conn)!
+		conn.close()!
+		exited := wait_for_exit(mut server.process)
+		server.stop()
+
+		response := first_bytes[..read].bytestr() + rest.bytestr()
+		expected := if range == '' { content } else { content[16..] }
+		assert response.all_after('\r\n\r\n').len == expected.len, name
+		assert response.ends_with(expected[expected.len - 64..]), name
+		assert exited, '${name}: the server is still running'
+		assert server.process.code == 0, name
+	}
+}
+
 fn test_not_found_pages() ! {
 	work_dir := make_site('not_found')
 	mut server := start_server(work_dir)

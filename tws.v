@@ -1,6 +1,7 @@
 module main
 
 import os
+import rand
 import sync
 import sync.stdatomic
 import net
@@ -9,6 +10,8 @@ import time
 import veb
 import net.http
 import net.urllib
+import compress.gzip
+import compress.zstd
 
 pub struct Context {
 	veb.Context
@@ -16,6 +19,11 @@ pub struct Context {
 
 const server_name = 'Tiniest Veb Server'
 const default_mime_type = 'application/octet-stream'
+// The kinds of files worth compressing, the other ones already are.
+const compressible_extensions = ['.css', '.csv', '.eot', '.htm', '.html', '.ico', '.ics', '.js',
+	'.json', '.jsonld', '.md', '.mjs', '.otf', '.svg', '.ttf', '.txt', '.wasm', '.xhtml', '.xml']!
+// A larger file is not compressed.
+const max_compressed_size = 1024 * 1024
 const allowed_methods = [http.Method.get, .head]!
 const allow_header = 'GET, HEAD, OPTIONS'
 const range_chunk_size = 64 * 1024
@@ -33,9 +41,10 @@ const stop_started_at = stdatomic.new_atomic(i64(0))
 const preconditions = [http.CommonHeader.if_match, .if_none_match, .if_modified_since,
 	.if_unmodified_since]!
 
-struct HeadersConfig {
+struct Config {
 	cache_control    string = 'public, max-age=3600'
 	expiration_delay int    = 3600
+	compression      bool
 }
 
 pub struct App {
@@ -115,10 +124,10 @@ pub fn (mut ctx Context) not_found() veb.Result {
 	return result
 }
 
-// load_headers_config reads the optional `headers.toml` file, a missing file
+// load_config reads the optional `headers.toml` file, a missing file
 // or a missing value falls back to the defaults.
-fn load_headers_config(path string) !HeadersConfig {
-	defaults := HeadersConfig{}
+fn load_config(path string) !Config {
+	defaults := Config{}
 	if !os.exists(path) {
 		return defaults
 	}
@@ -126,6 +135,7 @@ fn load_headers_config(path string) !HeadersConfig {
 	doc := toml.parse_file(path)!
 	cache_control := doc.value('cache_control').default_to(defaults.cache_control)
 	expiration_delay := doc.value('expiration_delay').default_to(defaults.expiration_delay)
+	compression := doc.value('compression').default_to(defaults.compression)
 
 	if cache_control !is string {
 		return error('`cache_control` must be a string')
@@ -133,22 +143,26 @@ fn load_headers_config(path string) !HeadersConfig {
 	if expiration_delay !is int && expiration_delay !is i64 {
 		return error('`expiration_delay` must be an integer')
 	}
+	if compression !is bool {
+		return error('`compression` must be a boolean')
+	}
 
-	return HeadersConfig{
+	return Config{
 		cache_control:    cache_control.string()
 		expiration_delay: expiration_delay.int()
+		compression:      compression.bool()
 	}
 }
 
 // set_headers adds the configured headers to a response.
-fn (config HeadersConfig) set_headers(mut ctx Context) {
+fn (config Config) set_headers(mut ctx Context) {
 	ctx.set_header(.server, server_name)
 	ctx.set_header(.cache_control, config.cache_control)
 	ctx.set_header(.expires, time.utc().add_seconds(config.expiration_delay).http_header_string())
 }
 
 // custom_headers returns a middleware adding the configured headers to a response.
-fn custom_headers(config HeadersConfig) veb.MiddlewareOptions[Context] {
+fn custom_headers(config Config) veb.MiddlewareOptions[Context] {
 	return veb.MiddlewareOptions[Context]{
 		after:   true
 		handler: fn [config] (mut ctx Context) bool {
@@ -326,7 +340,7 @@ fn send_range(mut conn net.TcpConn, head string, file os.File, start i64, length
 // a directory with an index to its path with a trailing slash, which veb
 // answers with a 404. The page is not served directly: without the slash, its
 // relative links would be resolved against the parent directory.
-fn redirect_to_directories(static_files &StaticFiles, config HeadersConfig) veb.MiddlewareOptions[Context] {
+fn redirect_to_directories(static_files &StaticFiles, config Config) veb.MiddlewareOptions[Context] {
 	return veb.MiddlewareOptions[Context]{
 		handler: fn [static_files, config] (mut ctx Context) bool {
 			url := urllib.parse(ctx.req.url) or { return true }
@@ -352,7 +366,7 @@ fn redirect_to_directories(static_files &StaticFiles, config HeadersConfig) veb.
 // serve_ranges returns a middleware answering the `GET` requests for a single
 // range of a file, which veb ignores: it streams the files and always sends
 // them entirely. Any other request is left to veb.
-fn serve_ranges(static_files &StaticFiles, config HeadersConfig, mut streams sync.Semaphore) veb.MiddlewareOptions[Context] {
+fn serve_ranges(static_files &StaticFiles, config Config, mut streams sync.Semaphore) veb.MiddlewareOptions[Context] {
 	mut etags := &EtagCache{}
 
 	return veb.MiddlewareOptions[Context]{
@@ -408,6 +422,125 @@ fn serve_ranges(static_files &StaticFiles, config HeadersConfig, mut streams syn
 			return false
 		}
 	}
+}
+
+// CompressedFile describes the compressed versions of a file, and the file
+// they were made from.
+struct CompressedFile {
+	size  u64
+	mtime i64
+	paths map[string]string // by content coding, the preferred one first
+}
+
+// accepted_coding returns the first of the `codings` accepted by a client,
+// from its `Accept-Encoding` header.
+fn accepted_coding(accept_encoding string, codings []string) ?string {
+	mut qualities := map[string]f64{}
+	for item in accept_encoding.to_lower().split(',') {
+		parts := item.split(';')
+		mut quality := 1.0
+		for param in parts[1..] {
+			name, value := param.split_once('=') or { continue }
+			if name.trim_space() == 'q' {
+				quality = value.trim_space().f64()
+			}
+		}
+		qualities[parts[0].trim_space()] = quality
+	}
+
+	for coding in codings {
+		quality := qualities[coding] or { qualities['*'] or { 0.0 } }
+		if quality > 0 {
+			return coding
+		}
+	}
+	return none
+}
+
+// compress_files writes the compressed versions of the text files served,
+// when they are smaller, in a directory.
+fn (static_files &StaticFiles) compress_files(directory string) map[string]CompressedFile {
+	mut compressed := map[string]CompressedFile{}
+	for file in static_files.static_files.values() {
+		ext := os.file_ext(file).to_lower()
+		size := os.file_size(file)
+		if ext !in compressible_extensions || file in compressed || size > max_compressed_size {
+			continue
+		}
+
+		mtime := os.file_last_mod_unix(file)
+		content := os.read_bytes(file) or { continue }
+		mut paths := map[string]string{}
+		for coding in ['zstd', 'gzip'] {
+			encoded := if coding == 'zstd' {
+				zstd.compress(content) or { continue }
+			} else {
+				gzip.compress(content) or { continue }
+			}
+			// veb finds the type of a file from its extension
+			path := os.join_path(directory, '${compressed.len}.${coding}${ext}')
+			if encoded.len < content.len {
+				os.write_file_array(path, encoded) or { continue }
+				paths[coding] = path
+			}
+		}
+		compressed[file] = CompressedFile{
+			size:  size
+			mtime: mtime
+			paths: paths
+		}
+	}
+	return compressed
+}
+
+// serve_compressed returns a middleware sending the compressed version of a
+// file to the clients accepting it. A file modified since it was compressed,
+// a range of a file and anything else are left to the next handlers.
+fn serve_compressed(static_files &StaticFiles, compressed map[string]CompressedFile, config Config) veb.MiddlewareOptions[Context] {
+	return veb.MiddlewareOptions[Context]{
+		handler: fn [static_files, compressed, config] (mut ctx Context) bool {
+			if ctx.req.method !in allowed_methods || ctx.req.header.contains(.range) {
+				return true
+			}
+
+			accept_encoding := ctx.req.header.get(.accept_encoding) or { return true }
+			url := urllib.parse(ctx.req.url) or { return true }
+			file := static_files.find_file(url.path) or { return true }
+			version := compressed[file] or { return true }
+			if os.file_size(file) != version.size || os.file_last_mod_unix(file) != version.mtime {
+				return true
+			}
+			coding := accepted_coding(accept_encoding, version.paths.keys()) or { return true }
+			if !os.exists(version.paths[coding]) {
+				return true
+			}
+
+			// veb sends it like any other file, with its own validators
+			ctx.set_header(.content_encoding, coding)
+			ctx.file(version.paths[coding])
+			ctx.set_header(.vary, 'Accept-Encoding')
+			// a range is always a part of the file as it is, not of this version
+			ctx.res.header.delete(.accept_ranges)
+			config.set_headers(mut ctx)
+			return false
+		}
+	}
+}
+
+// enable_compression compresses the text files once, before the server
+// starts, in a private directory removed when it stops. veb can compress the
+// files itself, but it does so while it answers the first requests for them,
+// which then get incomplete responses.
+fn (mut static_files StaticFiles) enable_compression(config Config) ! {
+	directory := os.join_path(os.temp_dir(), 'tveb_${rand.ulid().to_lower()}')
+	os.mkdir(directory, mode: 0o700)!
+	at_exit(fn [directory] () {
+		os.rmdir_all(directory) or {}
+	})!
+
+	println('Compressing the files...')
+	static_files.use(serve_compressed(static_files, static_files.compress_files(directory),
+		config))
 }
 
 fn request_stop(_ os.Signal) {
@@ -475,7 +608,7 @@ fn main() {
 		exit(1)
 	}
 
-	headers_config := load_headers_config('headers.toml') or {
+	config := load_config('headers.toml') or {
 		eprintln('error: invalid headers.toml file: ${err.msg()}')
 		exit(1)
 	}
@@ -489,11 +622,16 @@ fn main() {
 	static_files.register_unknown_mime_types(folder)
 	static_files.handle_static(folder, true)!
 	static_files.remove_hidden_directories()
+	if config.compression {
+		static_files.enable_compression(config) or {
+			eprintln('warning: compression is disabled: ${err.msg()}')
+		}
+	}
 	static_files.use(restrict_methods())
-	static_files.use(redirect_to_directories(static_files, headers_config))
+	static_files.use(redirect_to_directories(static_files, config))
 	mut range_streams := sync.new_semaphore_init(max_range_streams)
-	static_files.use(serve_ranges(static_files, headers_config, mut range_streams))
-	static_files.use(custom_headers(headers_config))
+	static_files.use(serve_ranges(static_files, config, mut range_streams))
+	static_files.use(custom_headers(config))
 
 	// The empty path is deliberate: with '/', veb strips it from the URL and
 	// `GET /` would not match the root index anymore.

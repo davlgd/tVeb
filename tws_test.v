@@ -159,9 +159,10 @@ fn test_headers_file_is_optional() ! {
 
 fn test_invalid_headers_file_is_reported_at_startup() ! {
 	for name, content in {
-		'malformed':   'cache_control = '
-		'wrong_cache': 'cache_control = 42'
-		'wrong_delay': 'expiration_delay = "one hour"'
+		'malformed':         'cache_control = '
+		'wrong_cache':       'cache_control = 42'
+		'wrong_delay':       'expiration_delay = "one hour"'
+		'wrong_compression': 'compression = "gzip"'
 	} {
 		work_dir := make_site(name)
 		os.write_file(os.join_path(work_dir, 'headers.toml'), content)!
@@ -462,6 +463,91 @@ fn test_requests_being_answered_are_completed_when_the_server_stops() ! {
 		assert response.ends_with(expected[expected.len - 64..]), name
 		assert exited, '${name}: the server is still running'
 		assert server.process.code == 0, name
+	}
+}
+
+fn get_encoded(url string, accept_encoding string) !http.Response {
+	mut request_header := http.new_header()
+	request_header.add(.accept_encoding, accept_encoding)
+	return http.fetch(url: url, header: request_header)
+}
+
+fn test_files_are_not_compressed_by_default() ! {
+	mut server := start_server(make_site('no_compression'))
+	defer {
+		server.stop()
+	}
+
+	res := get_encoded(server.url + '/css/main.css', 'zstd, gzip')!
+	assert res.status_code == 200
+	assert !res.header.contains(.content_encoding)
+	assert res.body == 'body {}'
+}
+
+fn test_text_files_are_compressed_when_enabled() ! {
+	work_dir := make_site('compression')
+	css := 'body { color: red; }\n'.repeat(1000)
+	css_file := os.join_path(work_dir, 'site', 'css', 'main.css')
+	os.write_file(css_file, css)!
+	os.write_file(os.join_path(work_dir, 'site', 'image.png'), css)!
+	os.write_file(os.join_path(work_dir, 'headers.toml'), 'compression = true')!
+
+	// the files are compressed each time the server starts
+	for name in ['start', 'restart'] {
+		mut server := start_server(work_dir)
+		url := server.url + '/css/main.css'
+
+		for encoding in ['gzip', 'zstd'] {
+			res := get_encoded(url, encoding)!
+			assert res.status_code == 200, '${name} ${encoding}'
+			assert header(res, .content_encoding) == encoding, '${name} ${encoding}'
+			assert header(res, .content_type) == 'text/css', '${name} ${encoding}'
+			assert header(res, .vary) == 'Accept-Encoding', '${name} ${encoding}'
+			assert !res.header.contains(.accept_ranges), '${name} ${encoding}'
+			assert header(res, .content_length).int() < css.len / 10, '${name} ${encoding}'
+			assert header(res, .server) == server_name, '${name} ${encoding}'
+			assert header(res, .cache_control) == 'public, max-age=3600', '${name} ${encoding}'
+
+			mut request_header := http.new_header()
+			request_header.add(.accept_encoding, encoding)
+			request_header.add(.if_none_match, header(res, .etag))
+			assert http.fetch(url: url, header: request_header)!.status_code == 304, '${name} ${encoding}'
+		}
+		assert get_encoded(url, 'gzip')!.body == css, name
+		assert header(get_encoded(url, 'gzip, zstd')!, .content_encoding) == 'zstd', name
+		assert header(get_encoded(url, 'zstd;q=0, *')!, .content_encoding) == 'gzip', name
+
+		// what a client does not accept, an image and a range are not compressed
+		for encoding in ['identity', 'br', 'gzip;q=0'] {
+			res := get_encoded(url, encoding)!
+			assert !res.header.contains(.content_encoding), '${name} ${encoding}'
+			assert res.body == css, '${name} ${encoding}'
+		}
+		assert !http.get(url)!.header.contains(.content_encoding), name
+		assert !get_encoded(server.url + '/image.png', 'gzip')!.header.contains(.content_encoding), name
+		mut request_header := http.new_header()
+		request_header.add(.accept_encoding, 'gzip')
+		request_header.add(.range, 'bytes=0-3')
+		range := http.fetch(url: url, header: request_header)!
+		assert range.status_code == 206, name
+		assert range.body == 'body', name
+		assert !range.header.contains(.content_encoding), name
+
+		// a file modified since the server started is sent as it is
+		if name == 'restart' {
+			os.write_file(css_file, css + 'a {}')!
+			modified := get_encoded(url, 'gzip')!
+			assert !modified.header.contains(.content_encoding)
+			assert modified.body == css + 'a {}'
+		}
+
+		// stopped properly, the server removes the compressed files; its
+		// output can only be read once it has exited
+		server.process.signal_term()
+		assert wait_for_exit(mut server.process), name
+		server.process.wait()
+		assert !server.process.stderr_slurp().contains('warning'), name
+		server.process.close()
 	}
 }
 

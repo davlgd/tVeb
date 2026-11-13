@@ -5,13 +5,17 @@ import net
 import toml
 import time
 import veb
-import net.http
 
 pub struct Context {
 	veb.Context
 }
 
 const server_name = 'Tiniest Veb Server'
+
+struct HeadersConfig {
+	cache_control    string = 'public, max-age=3600'
+	expiration_delay int    = 3600
+}
 
 pub struct App {
 	veb.StaticHandler
@@ -76,31 +80,44 @@ pub fn (mut ctx Context) not_found() veb.Result {
 	return result
 }
 
-pub fn custom_headers(mut ctx Context) bool {
-	add_headers_to_context(mut ctx)
-	return true
+// load_headers_config reads the optional `headers.toml` file, a missing file
+// or a missing value falls back to the defaults.
+fn load_headers_config(path string) !HeadersConfig {
+	defaults := HeadersConfig{}
+	if !os.exists(path) {
+		return defaults
+	}
+
+	doc := toml.parse_file(path)!
+	cache_control := doc.value('cache_control').default_to(defaults.cache_control)
+	expiration_delay := doc.value('expiration_delay').default_to(defaults.expiration_delay)
+
+	if cache_control !is string {
+		return error('`cache_control` must be a string')
+	}
+	if expiration_delay !is int && expiration_delay !is i64 {
+		return error('`expiration_delay` must be an integer')
+	}
+
+	return HeadersConfig{
+		cache_control:    cache_control.string()
+		expiration_delay: expiration_delay.int()
+	}
 }
 
-fn add_headers_to_context(mut ctx Context) {
-	default_cache_control := 'public, max-age=3600'
-	default_expiration_delay := 3600
-	headers := toml.parse_file('headers.toml') or { panic(err) }
-
-	ctx.set_header(.server, server_name)
-	ctx.res.header.add(http.CommonHeader.cache_control, headers
-		.value('cache_control')
-		.default_to(default_cache_control)
-		.string())
-
-	file_mod_timesamp := os.file_last_mod_unix(ctx.return_file)
-	file_mod_datetime := time.unix(file_mod_timesamp)
-	ctx.res.header.add(http.CommonHeader.last_modified, file_mod_datetime.http_header_string())
-
-	ctx.res.header.add(.expires, time.utc()
-		.add_seconds(headers
-			.value('expiration_delay')
-			.default_to(default_expiration_delay).int())
-		.http_header_string())
+// custom_headers returns a middleware adding the configured headers to a response.
+fn custom_headers(config HeadersConfig) veb.MiddlewareOptions[Context] {
+	return veb.MiddlewareOptions[Context]{
+		after:   true
+		handler: fn [config] (mut ctx Context) bool {
+			file_mod_timesamp := os.file_last_mod_unix(ctx.return_file)
+			ctx.set_header(.server, server_name)
+			ctx.set_header(.cache_control, config.cache_control)
+			ctx.set_header(.last_modified, time.unix(file_mod_timesamp).http_header_string())
+			ctx.set_header(.expires, time.utc().add_seconds(config.expiration_delay).http_header_string())
+			return true
+		}
+	}
 }
 
 fn main() {
@@ -127,6 +144,11 @@ fn main() {
 		exit(1)
 	}
 
+	headers_config := load_headers_config('headers.toml') or {
+		eprintln('error: invalid headers.toml file: ${err.msg()}')
+		exit(1)
+	}
+
 	mut test_port := net.listen_tcp(.ip, ':$port') or {
 		eprintln("error: the port ${port} seems to be busy")
 		exit(1)
@@ -135,7 +157,7 @@ fn main() {
 
 	mut app := &App{}
 	app.handle_static(folder, true)!
-	app.use(handler: custom_headers, after: true)
+	app.use(custom_headers(headers_config))
 	println("Server is started, serving '${folder}' folder")
 	veb.run[App, Context](mut app, port)
 }

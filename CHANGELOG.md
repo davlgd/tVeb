@@ -4,6 +4,21 @@ All notable changes to Tiniest Veb Server (tVeb) will be documented in this file
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Commit messages after the 0.2.0 release follow the [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) specification.
 
+## [0.3.0] - 2026-11-13
+
+### Added
+
+- The server stops gracefully on `SIGINT`, `SIGTERM` and `SIGHUP`: it no longer accepts connections and gives 8 seconds to the requests being answered to complete ([#14](https://github.com/davlgd/tVeb/issues/14))
+- Optional compression of the text files with zstd and gzip, enabled with `compression = true` in `headers.toml`: they are compressed once when the server starts, in the temporary folder of the system or the `compression_folder` one ([#11](https://github.com/davlgd/tVeb/issues/11))
+- Custom headers added to every response, defined in a `[headers]` table of `headers.toml` ([#12](https://github.com/davlgd/tVeb/issues/12))
+- Optional access log, enabled with `access_log = true` in `headers.toml`: a JSON line on the standard output for each response ([#13](https://github.com/davlgd/tVeb/issues/13))
+- Files without extension are served, with a type guessed from their content, pages and XML documents as plain text ([#15](https://github.com/davlgd/tVeb/issues/15))
+- Files added while the server runs are served, a removed one gets the not found page ([#15](https://github.com/davlgd/tVeb/issues/15))
+
+### Fixed
+
+- A busy port is detected on Windows too, where listening on a port already used by another program succeeds: the server now also tries to connect to it, which delays its start by about two seconds there ([#4](https://github.com/davlgd/tVeb/issues/4))
+
 ## [0.2.1] - 2026-11-13
 
 ### Fixed
@@ -79,6 +94,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Initial public release
 
+[0.3.0]: https://github.com/davlgd/tVeb/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/davlgd/tVeb/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/davlgd/tVeb/compare/v0.1.5...v0.2.0
 [0.1.5]: https://github.com/davlgd/tVeb/compare/v0.1.4...v0.1.5

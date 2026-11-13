@@ -242,10 +242,33 @@ fn is_address_in_use(err IError) bool {
 	}
 }
 
+fn can_connect(address string) bool {
+	mut conn := net.dial_tcp(address) or { return false }
+	conn.close() or {}
+	return true
+}
+
+// is_port_answering tells if something accepts connections on a port. It is
+// the only way to know on Windows, where listening on a port already used by
+// another program succeeds. Both addresses are tried at the same time: a
+// refused connection takes a couple of seconds there.
+fn is_port_answering(port int) bool {
+	mut attempts := []thread bool{}
+	for host in ['127.0.0.1', '[::1]'] {
+		attempts << spawn can_connect('${host}:${port}')
+	}
+	return attempts.wait().any(it)
+}
+
 // check_port fails when the server can't listen on the port. It tries the
 // wildcard and loopback addresses of both families: veb listens on IPv6 by
 // default, and asks to kill any process it finds listening on the port.
 fn check_port(port int) ! {
+	$if windows {
+		if is_port_answering(port) {
+			return error('the port ${port} seems to be busy')
+		}
+	}
 	for family, hosts in {
 		net.AddrFamily.ip6: ['', '[::1]']
 		net.AddrFamily.ip:  ['', '127.0.0.1']

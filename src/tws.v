@@ -23,7 +23,7 @@ fn print_help() {
 fn get_settings() (string, int, string) {
 	mut folder := 'public'
 	mut port := 8080
-	mut error := ''
+	mut error_msg := ''
 
 	if os.args.len > 3 {
 		return '', 0, 'error: too many arguments'
@@ -54,7 +54,7 @@ fn get_settings() (string, int, string) {
 		}
 	}
 
-	return folder, port, error
+	return folder, port, error_msg
 }
 
 pub fn (mut ctx Context) not_found() veb.Result {
@@ -102,10 +102,10 @@ fn add_headers_to_context(mut ctx Context) {
 }
 
 fn main() {
-	folder, port, error := get_settings()
+	folder, port, error_msg := get_settings()
 
-	if error != '' {
-		eprintln(error)
+	if error_msg != '' {
+		eprintln(error_msg)
 		print_help()
 		exit(1)
 	}

@@ -11,6 +11,8 @@ pub struct Context {
 	veb.Context
 }
 
+const server_name = 'Tiniest Veb Server'
+
 pub struct App {
 	veb.StaticHandler
 	veb.Middleware[Context]
@@ -65,13 +67,13 @@ pub fn (mut ctx Context) not_found() veb.Result {
 		file_path = '${folder}/${file_path}'
 	}
 
-	content := os.read_file(file_path) or {
-		ctx.res.set_status(.not_found)
-		return ctx.html('<h1>Page not found!</h1>')
-	}
+	content := os.read_file(file_path) or { '<h1>Page not found!</h1>' }
 
-	add_headers_to_context(mut ctx)
-	return ctx.html(content)
+	ctx.res.set_status(.not_found)
+	result := ctx.html(content)
+	// veb sets its own `Server` header when it prepares the response
+	ctx.set_header(.server, server_name)
+	return result
 }
 
 pub fn custom_headers(mut ctx Context) bool {
@@ -84,7 +86,7 @@ fn add_headers_to_context(mut ctx Context) {
 	default_expiration_delay := 3600
 	headers := toml.parse_file('headers.toml') or { panic(err) }
 
-	ctx.set_header(.server, 'Tiniest Veb Server')
+	ctx.set_header(.server, server_name)
 	ctx.res.header.add(http.CommonHeader.cache_control, headers
 		.value('cache_control')
 		.default_to(default_cache_control)

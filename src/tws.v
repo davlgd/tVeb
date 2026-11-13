@@ -18,6 +18,13 @@ struct HeadersConfig {
 }
 
 pub struct App {
+	veb.Controller
+}
+
+// StaticFiles serves the files through a controller: veb serves the static
+// files of the main app before any middleware runs, while a controller serves
+// them between its before and after middlewares, where headers can be added.
+pub struct StaticFiles {
 	veb.StaticHandler
 	veb.Middleware[Context]
 }
@@ -110,10 +117,8 @@ fn custom_headers(config HeadersConfig) veb.MiddlewareOptions[Context] {
 	return veb.MiddlewareOptions[Context]{
 		after:   true
 		handler: fn [config] (mut ctx Context) bool {
-			file_mod_timesamp := os.file_last_mod_unix(ctx.return_file)
 			ctx.set_header(.server, server_name)
 			ctx.set_header(.cache_control, config.cache_control)
-			ctx.set_header(.last_modified, time.unix(file_mod_timesamp).http_header_string())
 			ctx.set_header(.expires, time.utc().add_seconds(config.expiration_delay).http_header_string())
 			return true
 		}
@@ -155,9 +160,14 @@ fn main() {
 	}
 	test_port.close()!
 
+	mut static_files := &StaticFiles{}
+	static_files.handle_static(folder, true)!
+	static_files.use(custom_headers(headers_config))
+
+	// The empty path is deliberate: with '/', veb strips it from the URL and
+	// `GET /` would not match the root index anymore.
 	mut app := &App{}
-	app.handle_static(folder, true)!
-	app.use(custom_headers(headers_config))
+	app.register_controller[StaticFiles, Context]('', mut static_files)!
 	println("Server is started, serving '${folder}' folder")
 	veb.run[App, Context](mut app, port)
 }

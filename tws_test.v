@@ -204,6 +204,52 @@ fn test_busy_port_is_reported_at_startup() ! {
 	assert !output.contains('Kill it?')
 }
 
+fn test_files_with_an_unknown_mime_type_are_served() ! {
+	work_dir := make_site('unknown_mime_type')
+	site := os.join_path(work_dir, 'site')
+	os.write_file(os.join_path(site, 'data.xyz'), 'data')!
+	os.write_file(os.join_path(site, 'css', 'DATA.Unknown'), 'data')!
+	os.mkdir(os.join_path(site, '.well-known'))!
+	os.write_file(os.join_path(site, '.well-known', 'thing.unknown'), 'data')!
+	mut server := start_server(work_dir)
+	defer {
+		server.stop()
+	}
+
+	for path in ['/data.xyz', '/css/DATA.Unknown', '/.well-known/thing.unknown'] {
+		res := http.get(server.url + path)!
+		assert res.status_code == 200, path
+		assert res.body == 'data', path
+		assert header(res, .content_type) == default_mime_type, path
+	}
+
+	assert header(http.get(server.url)!, .content_type) == 'text/html'
+}
+
+fn test_hidden_directories_are_not_served() ! {
+	work_dir := make_site('hidden_directories')
+	site := os.join_path(work_dir, 'site')
+	os.mkdir_all(os.join_path(site, '.git', 'objects'))!
+	os.write_file(os.join_path(site, '.git', 'objects', 'history.pack'), 'secret')!
+	os.write_file(os.join_path(site, '.git', 'description.txt'), 'secret')!
+	os.mkdir_all(os.join_path(site, 'css', '.private'))!
+	os.write_file(os.join_path(site, 'css', '.private', 'page.html'), 'secret')!
+	os.mkdir(os.join_path(site, '.well-known'))!
+	os.write_file(os.join_path(site, '.well-known', 'security.txt'), 'public')!
+	mut server := start_server(work_dir)
+	defer {
+		server.stop()
+	}
+
+	for path in ['/.git/objects/history.pack', '/.git/description.txt', '/css/.private/page.html'] {
+		res := http.get(server.url + path)!
+		assert res.status_code == 404, path
+		assert !res.body.contains('secret'), path
+	}
+
+	assert http.get(server.url + '/.well-known/security.txt')!.body == 'public'
+}
+
 fn test_not_found_pages() ! {
 	work_dir := make_site('not_found')
 	mut server := start_server(work_dir)

@@ -11,6 +11,7 @@ pub struct Context {
 }
 
 const server_name = 'Tiniest Veb Server'
+const default_mime_type = 'application/octet-stream'
 
 struct HeadersConfig {
 	cache_control    string = 'public, max-age=3600'
@@ -159,6 +160,28 @@ fn check_port(port int) ! {
 	}
 }
 
+// register_unknown_mime_types makes veb serve the files it has no MIME type
+// for as binary data, instead of refusing to serve the whole folder.
+fn (mut static_files StaticFiles) register_unknown_mime_types(folder string) {
+	for file in os.walk_ext(folder, '', hidden: true) {
+		ext := os.file_ext(file).to_lower()
+		if ext != '' && ext !in veb.mime_types {
+			static_files.static_mime_types[ext] = default_mime_type
+		}
+	}
+}
+
+// remove_hidden_directories stops serving the content of the hidden
+// directories veb has scanned, like `.git`. `.well-known` is kept.
+fn (mut static_files StaticFiles) remove_hidden_directories() {
+	for url_path in static_files.static_files.keys() {
+		if url_path.split('/').any(it.starts_with('.') && it != '.well-known') {
+			static_files.static_files.delete(url_path)
+			static_files.static_hosts.delete(url_path)
+		}
+	}
+}
+
 fn main() {
 	folder, port, error_msg := get_settings()
 
@@ -194,7 +217,9 @@ fn main() {
 	}
 
 	mut static_files := &StaticFiles{}
+	static_files.register_unknown_mime_types(folder)
 	static_files.handle_static(folder, true)!
+	static_files.remove_hidden_directories()
 	static_files.use(custom_headers(headers_config))
 
 	// The empty path is deliberate: with '/', veb strips it from the URL and

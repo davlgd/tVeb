@@ -50,11 +50,12 @@ const preconditions = [http.CommonHeader.if_match, .if_none_match, .if_modified_
 	.if_unmodified_since]!
 
 struct Config {
-	cache_control    string = 'public, max-age=3600'
-	expiration_delay int    = 3600
-	compression      bool
-	access_log       bool
-	headers          map[string]string
+	cache_control      string = 'public, max-age=3600'
+	expiration_delay   int    = 3600
+	compression        bool
+	compression_folder string
+	access_log         bool
+	headers            map[string]string
 }
 
 pub struct App {
@@ -149,6 +150,7 @@ fn load_config(path string) !Config {
 	expiration_delay := doc.value('expiration_delay').default_to(defaults.expiration_delay)
 	compression := doc.value('compression').default_to(defaults.compression)
 	access_log := doc.value('access_log').default_to(defaults.access_log)
+	compression_folder := doc.value('compression_folder').default_to(defaults.compression_folder)
 
 	if cache_control !is string {
 		return error('`cache_control` must be a string')
@@ -161,6 +163,9 @@ fn load_config(path string) !Config {
 	}
 	if access_log !is bool {
 		return error('`access_log` must be a boolean')
+	}
+	if compression_folder !is string {
+		return error('`compression_folder` must be a string')
 	}
 
 	mut headers := map[string]string{}
@@ -191,11 +196,12 @@ fn load_config(path string) !Config {
 	}
 
 	return Config{
-		cache_control:    cache_control.string()
-		expiration_delay: expiration_delay.int()
-		compression:      compression.bool()
-		access_log:       access_log.bool()
-		headers:          headers
+		cache_control:      cache_control.string()
+		expiration_delay:   expiration_delay.int()
+		compression:        compression.bool()
+		access_log:         access_log.bool()
+		compression_folder: compression_folder.string()
+		headers:            headers
 	}
 }
 
@@ -741,12 +747,31 @@ fn serve_compressed(static_files &StaticFiles, compressed map[string]CompressedF
 	}
 }
 
+// is_inside tells if a path is a folder, or in it.
+fn is_inside(path string, folder string) bool {
+	real_path := os.real_path(path)
+	// the root of a filesystem already ends with a separator
+	real_folder := os.real_path(folder).trim_right(os.path_separator)
+	return real_path == real_folder || real_path.starts_with(real_folder + os.path_separator)
+}
+
 // enable_compression compresses the text files once, before the server
-// starts, in a private directory removed when it stops. veb can compress the
+// starts, in a private directory removed when it stops. This directory is
+// created in the configured folder, or in the temporary one. veb can compress the
 // files itself, but it does so while it answers the first requests for them,
 // which then get incomplete responses.
 fn (mut static_files StaticFiles) enable_compression(config Config) ! {
-	directory := os.join_path(os.temp_dir(), 'tveb_${rand.ulid().to_lower()}')
+	parent := if config.compression_folder == '' {
+		os.temp_dir()
+	} else {
+		config.compression_folder
+	}
+	// the compressed files would be served like the other ones
+	if is_inside(parent, static_files.folder) {
+		return error('it is in the served folder')
+	}
+
+	directory := os.join_path(parent, 'tveb_${rand.ulid().to_lower()}')
 	os.mkdir(directory, mode: 0o700)!
 	at_exit(fn [directory] () {
 		os.rmdir_all(directory) or {}
@@ -844,6 +869,11 @@ fn main() {
 	}
 	if config.compression {
 		static_files.enable_compression(config) or {
+			// a folder which was asked for must be usable, unlike the default one
+			if config.compression_folder != '' {
+				eprintln("error: the '${config.compression_folder}' compression folder can't be used: ${err.msg()}")
+				exit(1)
+			}
 			eprintln('warning: compression is disabled: ${err.msg()}')
 		}
 	}

@@ -173,6 +173,7 @@ fn test_invalid_headers_file_is_reported_at_startup() ! {
 		'wrong_delay':       'expiration_delay = "one hour"'
 		'wrong_compression': 'compression = "gzip"'
 		'wrong_access_log':  'access_log = "stdout"'
+		'wrong_folder':      'compression_folder = true'
 		'headers_not_table': 'headers = "X-Frame-Options: DENY"'
 		'header_not_string': '[headers]\nX-Frame-Options = 1'
 		'reserved_header':   '[headers]\nContent-Length = "0"'
@@ -752,6 +753,60 @@ fn test_files_added_or_removed_since_startup() ! {
 		assert res.status_code == 404, path
 		assert res.body == '<h1>Page not found!</h1>', path
 	}
+}
+
+fn test_compressed_files_are_kept_in_the_configured_folder() ! {
+	work_dir := make_site('compression_folder')
+	css := 'body { color: red; }\n'.repeat(1000)
+	os.write_file(os.join_path(work_dir, 'site', 'css', 'main.css'), css)!
+	folder := os.join_path(work_dir, 'compressed')
+	os.mkdir(folder)!
+	os.write_file(os.join_path(work_dir, 'headers.toml'), "compression = true\ncompression_folder = 'compressed'")!
+	mut server := start_server(work_dir)
+
+	assert header(get_encoded(server.url + '/css/main.css', 'gzip')!, .content_encoding) == 'gzip'
+	directories := os.ls(folder)!
+	assert directories.len == 1
+	assert directories[0].starts_with('tveb_')
+	assert os.ls(os.join_path(folder, directories[0]))!.len == 2
+
+	// the server removes its directory when it is stopped properly
+	server.process.signal_term()
+	exited := wait_for_exit(mut server.process)
+	server.stop()
+	$if !windows {
+		assert exited
+		assert os.ls(folder)!.len == 0
+	}
+}
+
+fn test_unusable_compression_folder_is_reported_at_startup() ! {
+	work_dir := make_site('unusable_compression_folder')
+
+	// a folder which does not exist, then the served folder and one in it
+	for folder in ['missing', 'site', 'site/css'] {
+		os.write_file(os.join_path(work_dir, 'headers.toml'), "compression = true\ncompression_folder = '${folder}'")!
+		mut process := new_server_process(work_dir, free_port())
+		exited := wait_for_exit(mut process)
+		if !exited {
+			process.signal_kill()
+		}
+		process.wait()
+		errors := process.stderr_slurp()
+		process.close()
+
+		assert exited, '${folder}: the server started'
+		assert process.code == 1, folder
+		assert errors.contains("error: the '${folder}' compression folder can't be used"), folder
+		assert os.ls(os.join_path(work_dir, 'site'))!.len == 2, folder
+		assert os.ls(os.join_path(work_dir, 'site', 'css'))!.len == 2, folder
+	}
+
+	// it is not used, and not checked, when the compression is disabled
+	os.write_file(os.join_path(work_dir, 'headers.toml'), "compression_folder = 'missing'")!
+	mut server := start_server(work_dir)
+	assert http.get(server.url)!.status_code == 200
+	server.stop()
 }
 
 fn test_not_found_pages() ! {

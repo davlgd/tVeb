@@ -4,6 +4,12 @@ All notable changes to Tiniest Veb Server (tVeb) will be documented in this file
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Commit messages after the 0.2.0 release follow the [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) specification.
 
+## [Unreleased]
+
+### Changed
+
+- The project is now distributed under the Apache 2.0 license, with a `LICENSE` file: `v.mod` declared MIT before
+
 ## [0.3.0] - 2026-11-13
 
 ### Added
@@ -94,6 +100,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Initial public release
 
+[Unreleased]: https://github.com/davlgd/tVeb/compare/v0.3.0...HEAD
 [0.3.0]: https://github.com/davlgd/tVeb/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/davlgd/tVeb/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/davlgd/tVeb/compare/v0.1.5...v0.2.0

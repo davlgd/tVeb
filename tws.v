@@ -125,6 +125,40 @@ fn custom_headers(config HeadersConfig) veb.MiddlewareOptions[Context] {
 	}
 }
 
+// is_address_in_use tells if a listening error means that the address is
+// already used: `net` only reports the error number in its message.
+fn is_address_in_use(err IError) bool {
+	$if windows {
+		return err.msg().contains('${net.WsaError.wsaeaddrinuse}')
+	} $else {
+		return err.msg().contains('socket error: ${int(C.EADDRINUSE)};')
+	}
+}
+
+// check_port fails when the server can't listen on the port. It tries the
+// wildcard and loopback addresses of both families: veb listens on IPv6 by
+// default, and asks to kill any process it finds listening on the port.
+fn check_port(port int) ! {
+	for family, hosts in {
+		net.AddrFamily.ip6: ['', '[::1]']
+		net.AddrFamily.ip:  ['', '127.0.0.1']
+	} {
+		for host in hosts {
+			mut listener := net.listen_tcp(family, '${host}:${port}') or {
+				if is_address_in_use(err) {
+					return error('the port ${port} seems to be busy')
+				}
+				if host == '' {
+					return error("can't listen on the port ${port}: ${err.msg()}")
+				}
+				// a loopback address may not exist on this host
+				continue
+			}
+			listener.close() or {}
+		}
+	}
+}
+
 fn main() {
 	folder, port, error_msg := get_settings()
 
@@ -154,11 +188,10 @@ fn main() {
 		exit(1)
 	}
 
-	mut test_port := net.listen_tcp(.ip, ':$port') or {
-		eprintln("error: the port ${port} seems to be busy")
+	check_port(port) or {
+		eprintln('error: ${err.msg()}')
 		exit(1)
 	}
-	test_port.close()!
 
 	mut static_files := &StaticFiles{}
 	static_files.handle_static(folder, true)!

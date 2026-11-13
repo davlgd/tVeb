@@ -180,6 +180,30 @@ fn test_invalid_headers_file_is_reported_at_startup() ! {
 	}
 }
 
+fn test_busy_port_is_reported_at_startup() ! {
+	work_dir := make_site('busy_port')
+	mut listener := net.listen_tcp(.ip, '127.0.0.1:0')!
+	defer {
+		listener.close() or {}
+	}
+	port := int(listener.addr()!.port()!)
+
+	mut process := new_server_process(work_dir, port)
+	exited := wait_for_exit(mut process)
+	if !exited {
+		process.signal_kill()
+	}
+	process.wait()
+	output := process.stdout_slurp()
+	errors := process.stderr_slurp()
+	process.close()
+
+	assert exited, 'the server started'
+	assert process.code == 1
+	assert errors.contains('the port ${port} seems to be busy')
+	assert !output.contains('Kill it?')
+}
+
 fn test_not_found_pages() ! {
 	work_dir := make_site('not_found')
 	mut server := start_server(work_dir)
